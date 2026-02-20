@@ -2,17 +2,19 @@ import sys
 import cv2
 import numpy as np
 from pathlib import Path
+import torch
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QPushButton,
-    QVBoxLayout, QWidget, QHBoxLayout,
-    QSlider, QScrollArea
+    QApplication, QMainWindow, QWidget, QPushButton,
+    QVBoxLayout, QHBoxLayout, QSlider, QScrollArea
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QKeySequence, QShortcut,
     QPainter, QPen, QColor
 )
 from PySide6.QtCore import Qt, QTimer, QRect
+
+from segment_anything import sam_model_registry, SamPredictor
 
 
 # ======================
@@ -24,65 +26,90 @@ MASK_DIR  = BASE_DIR / "GUI/before/masks"
 AFTER_DIR = BASE_DIR / "GUI/after/masks"
 AFTER_DIR.mkdir(parents=True, exist_ok=True)
 
+SAM_WEIGHT = BASE_DIR / "weights/sam_vit_b_01ec64.pth"
+
 
 # ======================
-# Canvas (Fast)
+# SAM 로드
 # ======================
-class Canvas(QWidget):
+device = "cuda" if torch.cuda.is_available() else "cpu"
+sam = sam_model_registry["vit_b"](checkpoint=str(SAM_WEIGHT))
+sam.to(device)
+predictor = SamPredictor(sam)
+
+
+# ======================
+# Unified Canvas
+# ======================
+class UnifiedCanvas(QWidget):
+    """
+    mode:
+      - "brush" : 좌클릭 드래그로 mask=255
+      - "erase" : 좌클릭 드래그로 mask=0
+      - "sam"   : 좌클릭=FG(+), 우클릭=BG(-) 점 추가 후 SAM 실행
+    """
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True)
 
-        self.image_rgb = None            # np uint8 (H,W,3) RGB
-        self.mask = None                 # np uint8 (H,W) 0/255
+        # data
+        self.image_rgb = None            # np (H,W,3) RGB
+        self.image_bgr = None            # np (H,W,3) BGR (SAM set_image용)
+        self.mask = None                 # np (H,W) uint8 0/255
 
-        self.image_qimg = None           # QImage (wraps numpy)
-        self.image_pix = None            # QPixmap
+        # render cache
+        self.image_qimg = None
+        self.image_pix = None
 
-        # 오버레이 캐시 (ARGB)
-        self.overlay_np = None           # np uint8 (H,W,4)
-        self.overlay_qimg = None         # QImage (wraps overlay_np)
+        self.overlay_np = None           # (H,W,4) ARGB
+        self.overlay_qimg = None
 
+        # interaction
         self.scale_factor = 1.0
         self.brush_size = 10
-        self.mode = "brush"              # "brush" or "erase"
+        self.mode = "brush"
         self.drawing = False
-
-        # stroke 보간
         self.last_xy = None
 
-        # Undo
+        # SAM prompts
+        self.sam_points = []  # [[x,y],...]
+        self.sam_labels = []  # [1/0,...]
+
+        # undo
         self.mask_history = []
         self.max_undo = 30
 
-        # cursor 표시
+        # cursor
         self.cursor_pos = None
-
-        # overlay alpha
         self.overlay_alpha = 110
 
-    def set_data(self, image_rgb, mask_u8):
-        self.image_rgb = np.ascontiguousarray(image_rgb)
+        # 성능: 드래그 중 커서 업데이트 과다 방지(필요시)
+        # self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+
+    def set_data(self, image_bgr, mask_u8):
+        self.image_bgr = np.ascontiguousarray(image_bgr)
+        self.image_rgb = np.ascontiguousarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
         self.mask = np.ascontiguousarray(mask_u8)
 
         h, w, _ = self.image_rgb.shape
 
-        # 이미지 QImage/QPixmap (메모리 유지 위해 numpy를 멤버로 보관)
         self.image_qimg = QImage(self.image_rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.image_pix = QPixmap.fromImage(self.image_qimg)
 
-        # 오버레이 캐시 준비
         self.overlay_np = np.zeros((h, w, 4), dtype=np.uint8)
-        self.overlay_np[..., 1] = 255  # Green 채널 고정 (알파=0인 곳은 영향 없음)
+        self.overlay_np[..., 1] = 255  # green
         self.overlay_qimg = QImage(self.overlay_np.data, w, h, 4 * w, QImage.Format_ARGB32)
 
-        # 초기 오버레이 전체 갱신
         self.rebuild_overlay_full()
 
-        # 스케일/언두 리셋
         self.scale_factor = 1.0
         self.mask_history = []
         self.last_xy = None
+
+        # SAM 초기화
+        self.sam_points = []
+        self.sam_labels = []
+        predictor.set_image(cv2.cvtColor(self.image_bgr, cv2.COLOR_BGR2RGB))
 
         self.update_widget_size()
         self.update()
@@ -97,6 +124,18 @@ class Canvas(QWidget):
     def get_mask(self):
         return self.mask
 
+    def set_mode(self, mode: str):
+        self.mode = mode
+        self.drawing = False
+        self.last_xy = None
+        # SAM 모드로 전환 시, 기존 점은 유지(원하면 여기서 초기화 가능)
+        # if mode == "sam":
+        #     self.sam_points, self.sam_labels = [], []
+
+    def set_brush_size(self, value: int):
+        self.brush_size = int(value)
+
+    # ---------- Undo ----------
     def push_undo(self):
         if self.mask is None:
             return
@@ -111,15 +150,13 @@ class Canvas(QWidget):
         self.rebuild_overlay_full()
         self.update()
 
+    # ---------- Overlay ----------
     def rebuild_overlay_full(self):
         if self.mask is None or self.overlay_np is None:
             return
-        # alpha = mask>0 ? overlay_alpha : 0
-        alpha = np.where(self.mask > 0, self.overlay_alpha, 0).astype(np.uint8)
-        self.overlay_np[..., 3] = alpha
+        self.overlay_np[..., 3] = np.where(self.mask > 0, self.overlay_alpha, 0).astype(np.uint8)
 
     def update_overlay_dirty(self, x1, y1, x2, y2):
-        """x2,y2 inclusive"""
         if self.mask is None or self.overlay_np is None:
             return
         h, w = self.mask.shape
@@ -133,7 +170,6 @@ class Canvas(QWidget):
         m = self.mask[y1:y2 + 1, x1:x2 + 1]
         self.overlay_np[y1:y2 + 1, x1:x2 + 1, 3] = np.where(m > 0, self.overlay_alpha, 0).astype(np.uint8)
 
-        # repaint는 스케일 좌표로 dirty만
         dirty = QRect(
             int(x1 * self.scale_factor),
             int(y1 * self.scale_factor),
@@ -142,6 +178,7 @@ class Canvas(QWidget):
         )
         self.update(dirty)
 
+    # ---------- Zoom ----------
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             self.scale_factor *= 1.1 if event.angleDelta().y() > 0 else 0.9
@@ -151,28 +188,59 @@ class Canvas(QWidget):
         else:
             event.ignore()
 
+    # ---------- Mouse ----------
     def mouseMoveEvent(self, event):
         self.cursor_pos = event.position().toPoint()
-        if self.drawing:
-            self.paint_to_mask(event)
+
+        if self.mode in ("brush", "erase") and self.drawing:
+            self.paint_brush(event)
         else:
-            self.update()  # cursor만
+            # 커서만
+            self.update()
+
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
         if self.image_rgb is None or self.mask is None:
             return
-        if event.button() == Qt.LeftButton:
-            self.drawing = True
+
+        # BRUSH / ERASER
+        if self.mode in ("brush", "erase"):
+            if event.button() == Qt.LeftButton:
+                self.drawing = True
+                self.push_undo()
+                self.last_xy = None
+                self.paint_brush(event)
+            return
+
+        # SAM
+        if self.mode == "sam":
+            x = int(event.position().x() / self.scale_factor)
+            y = int(event.position().y() / self.scale_factor)
+
+            h, w = self.mask.shape
+            if not (0 <= x < w and 0 <= y < h):
+                return
+
+            if event.button() == Qt.LeftButton:
+                self.sam_points.append([x, y])
+                self.sam_labels.append(1)
+            elif event.button() == Qt.RightButton:
+                self.sam_points.append([x, y])
+                self.sam_labels.append(0)
+            else:
+                return
+
+            # SAM 실행은 mask를 크게 바꾸므로 undo 스냅샷
             self.push_undo()
-            self.last_xy = None
-            self.paint_to_mask(event)
+            self.run_sam()
+            return
 
     def mouseReleaseEvent(self, event):
         self.drawing = False
         self.last_xy = None
 
-    def paint_to_mask(self, event):
+    def paint_brush(self, event):
         x = int(event.position().x() / self.scale_factor)
         y = int(event.position().y() / self.scale_factor)
 
@@ -183,18 +251,14 @@ class Canvas(QWidget):
         r = int(self.brush_size)
         color = 255 if self.mode == "brush" else 0
 
-        # stroke 보간: 마지막 점과 현재 점 사이를 선으로 채움
         if self.last_xy is None:
             cv2.circle(self.mask, (x, y), r, int(color), -1)
-            x1, y1, x2, y2 = x - r, y - r, x + r, y + r
-            self.update_overlay_dirty(x1, y1, x2, y2)
+            self.update_overlay_dirty(x - r, y - r, x + r, y + r)
             self.last_xy = (x, y)
             return
 
         x0, y0 = self.last_xy
-        # 선 두께 = 2r 정도
         cv2.line(self.mask, (x0, y0), (x, y), int(color), thickness=max(1, 2 * r))
-        # 끝점 원도 추가 (모서리 매끈)
         cv2.circle(self.mask, (x, y), r, int(color), -1)
 
         x1 = min(x0, x) - r - 2
@@ -205,6 +269,25 @@ class Canvas(QWidget):
 
         self.last_xy = (x, y)
 
+    # ---------- SAM ----------
+    def run_sam(self):
+        if self.image_bgr is None or len(self.sam_points) == 0:
+            return
+
+        input_points = np.array(self.sam_points)
+        input_labels = np.array(self.sam_labels)
+
+        masks, _, _ = predictor.predict(
+            point_coords=input_points,
+            point_labels=input_labels,
+            multimask_output=False
+        )
+
+        self.mask = (masks[0] * 255).astype("uint8")
+        self.rebuild_overlay_full()
+        self.update()
+
+    # ---------- Paint ----------
     def paintEvent(self, event):
         if self.image_pix is None or self.overlay_qimg is None:
             return
@@ -212,33 +295,33 @@ class Canvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        # 이미지 좌표계로 스케일
+        # 이미지 좌표계로 그림
         painter.scale(self.scale_factor, self.scale_factor)
-
-        # 1) 원본
         painter.drawPixmap(0, 0, self.image_pix)
-
-        # 2) 마스크 오버레이 (캐시)
         painter.drawImage(0, 0, self.overlay_qimg)
 
-        # 3) 커서 (화면 좌표계로 그려야 함)
+        # 커서(화면 좌표계)
         if self.cursor_pos is not None:
             painter.resetTransform()
             pen = QPen(QColor(255, 0, 0))
             pen.setWidth(2)
             painter.setPen(pen)
-            r = int(self.brush_size * self.scale_factor)
+
+            if self.mode in ("brush", "erase"):
+                r = int(self.brush_size * self.scale_factor)
+            else:
+                r = 8  # SAM 클릭 커서 고정
             painter.drawEllipse(self.cursor_pos, r, r)
 
 
 # ======================
 # Main Window
 # ======================
-class MaskEditor(QMainWindow):
+class UnifiedEditor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mask Editor (Brush/Eraser) - Fast")
-        self.resize(1800, 1000)
+        self.setWindowTitle("Mask Editor - Unified (Brush/Eraser/SAM)")
+        self.resize(1900, 1000)
 
         self.mask_files = sorted(MASK_DIR.glob("*.png"))
         if not self.mask_files:
@@ -248,7 +331,7 @@ class MaskEditor(QMainWindow):
         self.index = 0
         self.current_name = None
 
-        self.canvas = Canvas()
+        self.canvas = UnifiedCanvas()
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.canvas)
         self.scroll.setWidgetResizable(False)
@@ -256,11 +339,13 @@ class MaskEditor(QMainWindow):
         # buttons
         btn_brush = QPushButton("Brush")
         btn_erase = QPushButton("Eraser")
+        btn_sam   = QPushButton("SAM Brush")
         btn_prev  = QPushButton("Prev")
         btn_next  = QPushButton("Next")
 
-        btn_brush.clicked.connect(lambda: self.set_mode("brush"))
-        btn_erase.clicked.connect(lambda: self.set_mode("erase"))
+        btn_brush.clicked.connect(lambda: self.canvas.set_mode("brush"))
+        btn_erase.clicked.connect(lambda: self.canvas.set_mode("erase"))
+        btn_sam.clicked.connect(lambda: self.canvas.set_mode("sam"))
         btn_prev.clicked.connect(self.prev_image)
         btn_next.clicked.connect(self.next_image)
 
@@ -269,23 +354,24 @@ class MaskEditor(QMainWindow):
         slider.setMinimum(1)
         slider.setMaximum(80)
         slider.setValue(10)
-        slider.valueChanged.connect(self.set_brush_size)
+        slider.valueChanged.connect(self.canvas.set_brush_size)
 
         # layout
+        root = QWidget()
+        self.setCentralWidget(root)
+
         layout = QVBoxLayout()
+        root.setLayout(layout)
         layout.addWidget(self.scroll)
 
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(btn_brush)
         btn_layout.addWidget(btn_erase)
+        btn_layout.addWidget(btn_sam)
         btn_layout.addWidget(btn_prev)
         btn_layout.addWidget(btn_next)
         layout.addLayout(btn_layout)
         layout.addWidget(slider)
-
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
 
         # Ctrl+Z Undo
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
@@ -298,7 +384,6 @@ class MaskEditor(QMainWindow):
         if mask is None or self.current_name is None:
             return
         save_path = AFTER_DIR / f"{self.current_name}.png"
-        # 저장 끊김 줄이기: 압축 낮춤(0~9, 낮을수록 빠름)
         cv2.imwrite(str(save_path), mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
     def focus_on_mask(self):
@@ -310,13 +395,8 @@ class MaskEditor(QMainWindow):
         if len(xs) == 0 or len(ys) == 0:
             return
 
-        x1, x2 = xs.min(), xs.max()
-        y1, y2 = ys.min(), ys.max()
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-
-        cx = int(cx * self.canvas.scale_factor)
-        cy = int(cy * self.canvas.scale_factor)
+        cx = int(((xs.min() + xs.max()) // 2) * self.canvas.scale_factor)
+        cy = int(((ys.min() + ys.max()) // 2) * self.canvas.scale_factor)
 
         h_bar = self.scroll.horizontalScrollBar()
         v_bar = self.scroll.verticalScrollBar()
@@ -326,8 +406,8 @@ class MaskEditor(QMainWindow):
 
     def load_current(self):
         mask_path = self.mask_files[self.index]
-        stem = mask_path.stem              # e.g. 2_obj0
-        image_key = stem.split("_obj")[0]  # e.g. 2
+        stem = mask_path.stem
+        image_key = stem.split("_obj")[0]
 
         image_path = None
         for ext in ["jpg", "png", "jpeg"]:
@@ -335,7 +415,6 @@ class MaskEditor(QMainWindow):
             if cand.exists():
                 image_path = cand
                 break
-
         if image_path is None:
             print("Image not found for:", stem)
             return
@@ -344,7 +423,6 @@ class MaskEditor(QMainWindow):
         if img_bgr is None:
             print("Failed to read image:", image_path)
             return
-        image_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if mask is None:
@@ -353,15 +431,9 @@ class MaskEditor(QMainWindow):
         mask = (mask > 127).astype(np.uint8) * 255
 
         self.current_name = stem
-        self.canvas.set_data(image_rgb, mask)
+        self.canvas.set_data(img_bgr, mask)
 
         QTimer.singleShot(0, self.focus_on_mask)
-
-    def set_mode(self, mode):
-        self.canvas.mode = mode
-
-    def set_brush_size(self, value):
-        self.canvas.brush_size = int(value)
 
     def next_image(self):
         self.auto_save()
@@ -380,6 +452,6 @@ class MaskEditor(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    editor = MaskEditor()
-    editor.showMaximized()
+    win = UnifiedEditor()
+    win.showMaximized()
     sys.exit(app.exec())
