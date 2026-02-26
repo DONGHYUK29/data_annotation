@@ -20,13 +20,83 @@ from segment_anything import sam_model_registry, SamPredictor
 # ======================
 # 경로 설정 (images/* 구조 사용)
 # ======================
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # .../data_annotation
+BASE_DIR = Path(__file__).resolve().parents[1]  # .../data_annotation
+
 IMAGE_DIR = BASE_DIR / "images" / "original"
 MASK_DIR  = BASE_DIR / "images" / "yolo_seg_results" / "masks"
-AFTER_DIR = BASE_DIR / "images" / "edit_results" / "masks"
-AFTER_DIR.mkdir(parents=True, exist_ok=True)
+LABEL_DIR = BASE_DIR / "images" / "yolo_seg_results" / "labels"
 
-SAM_WEIGHT = BASE_DIR / "weights/sam_vit_b_01ec64.pth"
+AFTER_MASK_DIR  = BASE_DIR / "images" / "edited_results" / "masks"
+AFTER_LABEL_DIR = BASE_DIR / "images" / "edited_results" / "labels"
+AFTER_MASK_DIR.mkdir(parents=True, exist_ok=True)
+AFTER_LABEL_DIR.mkdir(parents=True, exist_ok=True)
+
+SAM_WEIGHT = BASE_DIR / "weights" / "sam_vit_b_01ec64.pth"
+
+
+# ======================
+# Label utils
+# ======================
+HEADER = "# instance_id class_id x1 y1 x2 y2 poly_x0 poly_y0 poly_x1 poly_y1 ..."
+
+def read_label_lines(path: Path):
+    if not path.exists():
+        return [HEADER]
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return [HEADER]
+    if not lines[0].startswith("#"):
+        lines.insert(0, HEADER)
+    return lines
+
+def upsert_instance_line(lines: list[str], instance_id: str, new_line: str):
+    out = []
+    replaced = False
+    for ln in lines:
+        if ln.startswith("#"):
+            out.append(ln)
+            continue
+        parts = ln.split()
+        if parts and parts[0] == instance_id:
+            out.append(new_line)
+            replaced = True
+        else:
+            out.append(ln)
+    if not replaced:
+        out.append(new_line)
+    return out
+
+def mask_to_bbox_and_polygon(mask_u8: np.ndarray):
+    """
+    mask_u8: (H,W) uint8, 0/255
+    return:
+      bbox_xyxy: (x1,y1,x2,y2) float
+      polygon: list[(x,y)] float  (largest contour)
+    """
+    m = (mask_u8 > 127).astype(np.uint8)
+    ys, xs = np.where(m > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return None, None
+
+    x1, x2 = float(xs.min()), float(xs.max())
+    y1, y2 = float(ys.min()), float(ys.max())
+
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return (x1, y1, x2, y2), None
+
+    cnt = max(contours, key=cv2.contourArea)
+
+    # contour simplification (tune eps if needed)
+    eps = 1.0
+    approx = cv2.approxPolyDP(cnt, epsilon=eps, closed=True).reshape(-1, 2).astype(np.float32)
+    if len(approx) < 3:
+        poly = cnt.reshape(-1, 2).astype(np.float32)
+    else:
+        poly = approx
+
+    polygon = [(float(x), float(y)) for x, y in poly]
+    return (x1, y1, x2, y2), polygon
 
 
 # ======================
@@ -83,9 +153,6 @@ class UnifiedCanvas(QWidget):
         self.cursor_pos = None
         self.overlay_alpha = 110
 
-        # 성능: 드래그 중 커서 업데이트 과다 방지(필요시)
-        # self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-
     def set_data(self, image_bgr, mask_u8):
         self.image_bgr = np.ascontiguousarray(image_bgr)
         self.image_rgb = np.ascontiguousarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
@@ -128,9 +195,6 @@ class UnifiedCanvas(QWidget):
         self.mode = mode
         self.drawing = False
         self.last_xy = None
-        # SAM 모드로 전환 시, 기존 점은 유지(원하면 여기서 초기화 가능)
-        # if mode == "sam":
-        #     self.sam_points, self.sam_labels = [], []
 
     def set_brush_size(self, value: int):
         self.brush_size = int(value)
@@ -195,7 +259,6 @@ class UnifiedCanvas(QWidget):
         if self.mode in ("brush", "erase") and self.drawing:
             self.paint_brush(event)
         else:
-            # 커서만
             self.update()
 
         super().mouseMoveEvent(event)
@@ -231,7 +294,6 @@ class UnifiedCanvas(QWidget):
             else:
                 return
 
-            # SAM 실행은 mask를 크게 바꾸므로 undo 스냅샷
             self.push_undo()
             self.run_sam()
             return
@@ -295,12 +357,10 @@ class UnifiedCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        # 이미지 좌표계로 그림
         painter.scale(self.scale_factor, self.scale_factor)
         painter.drawPixmap(0, 0, self.image_pix)
         painter.drawImage(0, 0, self.overlay_qimg)
 
-        # 커서(화면 좌표계)
         if self.cursor_pos is not None:
             painter.resetTransform()
             pen = QPen(QColor(255, 0, 0))
@@ -310,7 +370,7 @@ class UnifiedCanvas(QWidget):
             if self.mode in ("brush", "erase"):
                 r = int(self.brush_size * self.scale_factor)
             else:
-                r = 8  # SAM 클릭 커서 고정
+                r = 8
             painter.drawEllipse(self.cursor_pos, r, r)
 
 
@@ -349,14 +409,12 @@ class UnifiedEditor(QMainWindow):
         btn_prev.clicked.connect(self.prev_image)
         btn_next.clicked.connect(self.next_image)
 
-        # brush size slider
         slider = QSlider(Qt.Horizontal)
         slider.setMinimum(1)
         slider.setMaximum(80)
         slider.setValue(10)
         slider.valueChanged.connect(self.canvas.set_brush_size)
 
-        # layout
         root = QWidget()
         self.setCentralWidget(root)
 
@@ -373,7 +431,6 @@ class UnifiedEditor(QMainWindow):
         layout.addLayout(btn_layout)
         layout.addWidget(slider)
 
-        # Ctrl+Z Undo
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.canvas.undo)
 
@@ -383,9 +440,66 @@ class UnifiedEditor(QMainWindow):
         mask = self.canvas.get_mask()
         if mask is None or self.current_name is None:
             return
-        # 예: current_name = "000001_obj0_mask" -> "000001_obj0_mask_edit.png"
-        save_path = AFTER_DIR / f"{self.current_name}_edit.png"
-        cv2.imwrite(str(save_path), mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+        # current_name: e.g., "2_obj0_mask"
+        stem = self.current_name
+
+        # instance_id: remove trailing "_mask" if exists
+        instance_id = stem[:-5] if stem.endswith("_mask") else stem.replace("_mask", "")
+
+        # image_id: prefix before "_obj"
+        image_id = instance_id.split("_obj")[0]
+
+        # (1) Save edited mask
+        save_mask_path = AFTER_MASK_DIR / f"{stem}_edit.png"
+        cv2.imwrite(str(save_mask_path), mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+        # (2) Load source labels (for class_id)
+        src_label_path = LABEL_DIR / f"{image_id}.txt"
+        src_lines = read_label_lines(src_label_path)
+
+        class_id = None
+        for ln in src_lines:
+            if ln.startswith("#"):
+                continue
+            parts = ln.split()
+            if parts and parts[0] == instance_id:
+                class_id = int(parts[1])
+                break
+
+        if class_id is None:
+            print(f"[WARN] class_id not found for instance_id={instance_id} in {src_label_path}")
+            return
+
+        # (3) Recompute bbox and polygon from edited mask
+        bbox, poly = mask_to_bbox_and_polygon(mask)
+        if bbox is None or poly is None or len(poly) < 3:
+            print(f"[WARN] empty/invalid mask after edit: {instance_id}")
+            return
+
+        x1, y1, x2, y2 = bbox
+
+        poly_flat = []
+        for (px, py) in poly:
+            poly_flat.append(f"{px:.2f}")
+            poly_flat.append(f"{py:.2f}")
+
+        new_line = (
+            f"{instance_id} {class_id} {x1:.2f} {y1:.2f} {x2:.2f} {y2:.2f} "
+            + " ".join(poly_flat)
+        )
+
+        # (4) Upsert into edited label file
+        dst_label_path = AFTER_LABEL_DIR / f"{image_id}.txt"
+
+        if dst_label_path.exists():
+            dst_lines = read_label_lines(dst_label_path)
+        else:
+            # start from source labels so unedited instances are preserved
+            dst_lines = src_lines.copy()
+
+        dst_lines = upsert_instance_line(dst_lines, instance_id, new_line)
+        dst_label_path.write_text("\n".join(dst_lines) + "\n", encoding="utf-8")
 
     def focus_on_mask(self):
         mask = self.canvas.get_mask()
