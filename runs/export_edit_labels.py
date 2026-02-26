@@ -134,7 +134,7 @@ def main():
 
     # write per-image label files
     for image_id, lines in per_image_lines.items():
-        out_path = EDIT_LABEL_DIR / f"{image_id}_edit.txt"
+        out_path = EDIT_LABEL_DIR / f"{image_id}_edited.txt"
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(
                 "# instance_id class_id x1 y1 x2 y2 "

@@ -27,8 +27,4 @@ weights/
 
 venv/
 
-images/**/*.png
-images/**/*.jpg
-images/**/*.jpeg
-images/**/*.txt
-!images/**/.gitkeep
+images/
