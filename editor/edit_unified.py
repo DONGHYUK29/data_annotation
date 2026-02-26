@@ -18,7 +18,7 @@ from segment_anything import sam_model_registry, SamPredictor
 
 
 # ======================
-# 경로 설정 (images/* 구조 사용)
+# Paths
 # ======================
 BASE_DIR = Path(__file__).resolve().parents[1]  # .../data_annotation
 
@@ -67,12 +67,6 @@ def upsert_instance_line(lines: list[str], instance_id: str, new_line: str):
     return out
 
 def mask_to_bbox_and_polygon(mask_u8: np.ndarray):
-    """
-    mask_u8: (H,W) uint8, 0/255
-    return:
-      bbox_xyxy: (x1,y1,x2,y2) float
-      polygon: list[(x,y)] float  (largest contour)
-    """
     m = (mask_u8 > 127).astype(np.uint8)
     ys, xs = np.where(m > 0)
     if len(xs) == 0 or len(ys) == 0:
@@ -87,7 +81,6 @@ def mask_to_bbox_and_polygon(mask_u8: np.ndarray):
 
     cnt = max(contours, key=cv2.contourArea)
 
-    # contour simplification (tune eps if needed)
     eps = 1.0
     approx = cv2.approxPolyDP(cnt, epsilon=eps, closed=True).reshape(-1, 2).astype(np.float32)
     if len(approx) < 3:
@@ -98,9 +91,52 @@ def mask_to_bbox_and_polygon(mask_u8: np.ndarray):
     polygon = [(float(x), float(y)) for x, y in poly]
     return (x1, y1, x2, y2), polygon
 
+def parse_instance_id_from_stem(stem: str) -> str:
+    """
+    Handles:
+      - 2_obj0_mask
+      - 2_obj0_mask_edit
+      - 2_obj0_mask_edited
+    Returns: 2_obj0
+    """
+    name = stem
+    for suf in ("_edited", "_edit"):
+        if name.endswith(suf):
+            name = name[: -len(suf)]
+    if name.endswith("_mask"):
+        name = name[: -len("_mask")]
+    return name
+
+def find_src_label_path(image_id: str) -> Path:
+    """
+    Prefer *_detected.txt, fallback to *.txt
+    """
+    p = LABEL_DIR / f"{image_id}_detected.txt"
+    if p.exists():
+        return p
+    p2 = LABEL_DIR / f"{image_id}.txt"
+    return p2
+
+def get_class_id_from_src_lines(src_lines: list[str]) -> int | None:
+    """
+    Your current label format uses only '2' (image_id) as first token,
+    so we simply take the first non-header line's class_id.
+    If multiple lines exist, this picks the first one's class_id.
+    """
+    for ln in src_lines:
+        if ln.startswith("#"):
+            continue
+        parts = ln.split()
+        if len(parts) >= 2:
+            try:
+                return int(float(parts[1]))
+            except ValueError:
+                return None
+    return None
+
 
 # ======================
-# SAM 로드
+# SAM
 # ======================
 device = "cuda" if torch.cuda.is_available() else "cpu"
 sam = sam_model_registry["vit_b"](checkpoint=str(SAM_WEIGHT))
@@ -112,44 +148,32 @@ predictor = SamPredictor(sam)
 # Unified Canvas
 # ======================
 class UnifiedCanvas(QWidget):
-    """
-    mode:
-      - "brush" : 좌클릭 드래그로 mask=255
-      - "erase" : 좌클릭 드래그로 mask=0
-      - "sam"   : 좌클릭=FG(+), 우클릭=BG(-) 점 추가 후 SAM 실행
-    """
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True)
 
-        # data
-        self.image_rgb = None            # np (H,W,3) RGB
-        self.image_bgr = None            # np (H,W,3) BGR (SAM set_image용)
-        self.mask = None                 # np (H,W) uint8 0/255
+        self.image_rgb = None
+        self.image_bgr = None
+        self.mask = None
 
-        # render cache
         self.image_qimg = None
         self.image_pix = None
 
-        self.overlay_np = None           # (H,W,4) ARGB
+        self.overlay_np = None
         self.overlay_qimg = None
 
-        # interaction
         self.scale_factor = 1.0
         self.brush_size = 10
         self.mode = "brush"
         self.drawing = False
         self.last_xy = None
 
-        # SAM prompts
-        self.sam_points = []  # [[x,y],...]
-        self.sam_labels = []  # [1/0,...]
+        self.sam_points = []
+        self.sam_labels = []
 
-        # undo
         self.mask_history = []
         self.max_undo = 30
 
-        # cursor
         self.cursor_pos = None
         self.overlay_alpha = 110
 
@@ -159,12 +183,11 @@ class UnifiedCanvas(QWidget):
         self.mask = np.ascontiguousarray(mask_u8)
 
         h, w, _ = self.image_rgb.shape
-
         self.image_qimg = QImage(self.image_rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.image_pix = QPixmap.fromImage(self.image_qimg)
 
         self.overlay_np = np.zeros((h, w, 4), dtype=np.uint8)
-        self.overlay_np[..., 1] = 255  # green
+        self.overlay_np[..., 1] = 255
         self.overlay_qimg = QImage(self.overlay_np.data, w, h, 4 * w, QImage.Format_ARGB32)
 
         self.rebuild_overlay_full()
@@ -173,7 +196,6 @@ class UnifiedCanvas(QWidget):
         self.mask_history = []
         self.last_xy = None
 
-        # SAM 초기화
         self.sam_points = []
         self.sam_labels = []
         predictor.set_image(cv2.cvtColor(self.image_bgr, cv2.COLOR_BGR2RGB))
@@ -199,7 +221,6 @@ class UnifiedCanvas(QWidget):
     def set_brush_size(self, value: int):
         self.brush_size = int(value)
 
-    # ---------- Undo ----------
     def push_undo(self):
         if self.mask is None:
             return
@@ -214,7 +235,6 @@ class UnifiedCanvas(QWidget):
         self.rebuild_overlay_full()
         self.update()
 
-    # ---------- Overlay ----------
     def rebuild_overlay_full(self):
         if self.mask is None or self.overlay_np is None:
             return
@@ -242,7 +262,6 @@ class UnifiedCanvas(QWidget):
         )
         self.update(dirty)
 
-    # ---------- Zoom ----------
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             self.scale_factor *= 1.1 if event.angleDelta().y() > 0 else 0.9
@@ -252,22 +271,18 @@ class UnifiedCanvas(QWidget):
         else:
             event.ignore()
 
-    # ---------- Mouse ----------
     def mouseMoveEvent(self, event):
         self.cursor_pos = event.position().toPoint()
-
         if self.mode in ("brush", "erase") and self.drawing:
             self.paint_brush(event)
         else:
             self.update()
-
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
         if self.image_rgb is None or self.mask is None:
             return
 
-        # BRUSH / ERASER
         if self.mode in ("brush", "erase"):
             if event.button() == Qt.LeftButton:
                 self.drawing = True
@@ -276,7 +291,6 @@ class UnifiedCanvas(QWidget):
                 self.paint_brush(event)
             return
 
-        # SAM
         if self.mode == "sam":
             x = int(event.position().x() / self.scale_factor)
             y = int(event.position().y() / self.scale_factor)
@@ -331,11 +345,9 @@ class UnifiedCanvas(QWidget):
 
         self.last_xy = (x, y)
 
-    # ---------- SAM ----------
     def run_sam(self):
         if self.image_bgr is None or len(self.sam_points) == 0:
             return
-
         input_points = np.array(self.sam_points)
         input_labels = np.array(self.sam_labels)
 
@@ -349,7 +361,6 @@ class UnifiedCanvas(QWidget):
         self.rebuild_overlay_full()
         self.update()
 
-    # ---------- Paint ----------
     def paintEvent(self, event):
         if self.image_pix is None or self.overlay_qimg is None:
             return
@@ -396,10 +407,9 @@ class UnifiedEditor(QMainWindow):
         self.scroll.setWidget(self.canvas)
         self.scroll.setWidgetResizable(False)
 
-        # buttons
         btn_brush = QPushButton("Brush")
         btn_erase = QPushButton("Eraser")
-        btn_sam   = QPushButton("SAM Brush")
+        btn_sam   = QPushButton("SAM")
         btn_prev  = QPushButton("Prev")
         btn_next  = QPushButton("Next")
 
@@ -441,37 +451,24 @@ class UnifiedEditor(QMainWindow):
         if mask is None or self.current_name is None:
             return
 
-        # current_name: e.g., "2_obj0_mask"
-        stem = self.current_name
-
-        # instance_id: remove trailing "_mask" if exists
-        instance_id = stem[:-5] if stem.endswith("_mask") else stem.replace("_mask", "")
-
-        # image_id: prefix before "_obj"
-        image_id = instance_id.split("_obj")[0]
+        stem = self.current_name  # e.g. "2_obj0_mask"
+        instance_id = parse_instance_id_from_stem(stem)  # "2_obj0"
+        image_id = instance_id.split("_obj")[0]          # "2"
 
         # (1) Save edited mask
-        save_mask_path = AFTER_MASK_DIR / f"{stem}_edit.png"
+        save_mask_path = AFTER_MASK_DIR / f"{stem}_edited.png"
         cv2.imwrite(str(save_mask_path), mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
-        # (2) Load source labels (for class_id)
-        src_label_path = LABEL_DIR / f"{image_id}.txt"
+        # (2) Load source labels (class_id is keyed by image_id-only in your current format)
+        src_label_path = find_src_label_path(image_id)
         src_lines = read_label_lines(src_label_path)
-
-        class_id = None
-        for ln in src_lines:
-            if ln.startswith("#"):
-                continue
-            parts = ln.split()
-            if parts and parts[0] == instance_id:
-                class_id = int(parts[1])
-                break
+        class_id = get_class_id_from_src_lines(src_lines)
 
         if class_id is None:
-            print(f"[WARN] class_id not found for instance_id={instance_id} in {src_label_path}")
+            print(f"[WARN] class_id not found in {src_label_path} (your label first token is image_id-only)")
             return
 
-        # (3) Recompute bbox and polygon from edited mask
+        # (3) Recompute bbox and polygon
         bbox, poly = mask_to_bbox_and_polygon(mask)
         if bbox is None or poly is None or len(poly) < 3:
             print(f"[WARN] empty/invalid mask after edit: {instance_id}")
@@ -484,22 +481,26 @@ class UnifiedEditor(QMainWindow):
             poly_flat.append(f"{px:.2f}")
             poly_flat.append(f"{py:.2f}")
 
+        # IMPORTANT: we write edited label with instance_id = "2_obj0" (consistent with mask naming)
         new_line = (
             f"{instance_id} {class_id} {x1:.2f} {y1:.2f} {x2:.2f} {y2:.2f} "
             + " ".join(poly_flat)
         )
 
         # (4) Upsert into edited label file
-        dst_label_path = AFTER_LABEL_DIR / f"{image_id}.txt"
+        dst_label_path = AFTER_LABEL_DIR / f"{image_id}_edited.txt"
 
         if dst_label_path.exists():
             dst_lines = read_label_lines(dst_label_path)
         else:
-            # start from source labels so unedited instances are preserved
-            dst_lines = src_lines.copy()
+            # start from source labels BUT convert any "image_id-only" rows into instance rows is not possible.
+            # So we start a fresh file with header.
+            dst_lines = [HEADER]
 
         dst_lines = upsert_instance_line(dst_lines, instance_id, new_line)
         dst_label_path.write_text("\n".join(dst_lines) + "\n", encoding="utf-8")
+
+        print(f"[SAVE] {save_mask_path.name} + {dst_label_path.name}")
 
     def focus_on_mask(self):
         mask = self.canvas.get_mask()

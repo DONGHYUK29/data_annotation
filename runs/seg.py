@@ -28,7 +28,7 @@ def save_instance(
 ) -> None:
     """
     Save one instance:
-    - binary mask PNG: images/yolo_seg_results/masks/{instance_id}_mask.png
+    - binary mask PNG: images/yolo_seg_results/masks/{instance_id}_masked.png
     - one line of metadata into opened label file
 
     Line format (space separated):
@@ -52,7 +52,7 @@ def save_instance(
     h, w = img_bgr.shape[:2]
     mask_u8 = cv2.resize(mask_u8, (w, h), interpolation=cv2.INTER_NEAREST)
 
-    mask_name = f"{instance_id}_mask.png"
+    mask_name = f"{instance_id}_masked.png"
     cv2.imwrite(str(YOLO_SEG_MASK_DIR / mask_name), mask_u8)
 
     # write one line of metadata
@@ -86,7 +86,7 @@ def main():
             # nothing detected -> skip creating label file
             continue
 
-        label_path = YOLO_SEG_LABEL_DIR / f"{image_id}.txt"
+        label_path = YOLO_SEG_LABEL_DIR / f"{image_id}_detected.txt"
         with open(label_path, "w", encoding="utf-8") as f:
             # optional header (commented, starts with '#')
             f.write(
