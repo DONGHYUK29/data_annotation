@@ -1,0 +1,11 @@
+venv/
+.venv/
+env/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# 깃 설정
+.git/
+.gitignore

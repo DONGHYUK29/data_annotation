@@ -23,3 +23,6 @@ weights/
 
 # system
 .DS_Store
+
+
+venv/
