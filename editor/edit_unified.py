@@ -410,12 +410,14 @@ class UnifiedEditor(QMainWindow):
         btn_brush = QPushButton("Brush")
         btn_erase = QPushButton("Eraser")
         btn_sam   = QPushButton("SAM")
+        btn_save   = QPushButton("Save")
         btn_prev  = QPushButton("Prev")
         btn_next  = QPushButton("Next")
 
         btn_brush.clicked.connect(lambda: self.canvas.set_mode("brush"))
         btn_erase.clicked.connect(lambda: self.canvas.set_mode("erase"))
         btn_sam.clicked.connect(lambda: self.canvas.set_mode("sam"))
+        btn_save.clicked.connect(self.auto_save)
         btn_prev.clicked.connect(self.prev_image)
         btn_next.clicked.connect(self.next_image)
 
@@ -436,6 +438,7 @@ class UnifiedEditor(QMainWindow):
         btn_layout.addWidget(btn_brush)
         btn_layout.addWidget(btn_erase)
         btn_layout.addWidget(btn_sam)
+        btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_prev)
         btn_layout.addWidget(btn_next)
         layout.addLayout(btn_layout)
