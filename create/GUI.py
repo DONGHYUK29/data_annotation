@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QKeySequence, QShortcut,
-    QPainter, QPen, QColor
+    QPainter, QPen, QColor, QFont
 )
 from PySide6.QtCore import Qt, QTimer, QRect
 
@@ -21,9 +21,11 @@ from segment_anything import sam_model_registry, SamPredictor
 
 
 # ======================
-# Paths
+# Paths ###################################### 본인 BASE_DIR 입력력
 # ======================
-BASE_DIR = Path(r"C:\Users\sangw\Desktop\Project\project\data_annotation_dh\create")
+#BASE_DIR = Path(r"C:\Users\user\Desktop\pj\research\data_annotation_sw\create")
+
+
 
 IMAGE_DIR = BASE_DIR / "input"
 MASK_DIR  = BASE_DIR / "output_1" / "masks"
@@ -37,7 +39,7 @@ AFTER_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 AFTER_MASK_DIR.mkdir(parents=True, exist_ok=True)
 AFTER_LABEL_DIR.mkdir(parents=True, exist_ok=True)
 
-SAM_WEIGHT = r"C:\Users\sangw\Desktop\Project\project\data_annotation_dh\weights\sam_vit_b_01ec64.pth"
+SAM_WEIGHT = r"C:\Users\user\Desktop\pj\research\data_annotation_sw\weights\sam_vit_b_01ec64.pth"
 
 
 # ======================
@@ -69,6 +71,7 @@ def mask_to_bbox_and_polygon(mask_u8: np.ndarray):
     polygon = [(float(x), float(y)) for x, y in poly]
     return (x1, y1, x2, y2), polygon
 
+
 def parse_instance_id_from_stem(stem: str) -> str:
     name = stem
     for suf in ("_edited", "_edit", "_masked", "_mask"):
@@ -77,6 +80,7 @@ def parse_instance_id_from_stem(stem: str) -> str:
     if name.endswith("_mask"):
         name = name[: -len("_mask")]
     return name
+
 
 # ======================
 # SAM
@@ -88,7 +92,7 @@ predictor = SamPredictor(sam)
 
 
 # ======================
-# Small LRU cache (for faster switching)
+# Small LRU cache
 # ======================
 class LRUCache:
     def __init__(self, capacity: int = 16):
@@ -112,10 +116,6 @@ class LRUCache:
 # Unified Canvas
 # ======================
 class UnifiedCanvas(QWidget):
-    """
-    - 이미지/마스크 렌더링 + 브러시/지우개 + SAM 포인트 입력
-    - SAM embedding(set_image)은 에디터가 준비(ensure_sam_ready)해준 뒤에만 run_sam 실행
-    """
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True)
@@ -146,7 +146,7 @@ class UnifiedCanvas(QWidget):
         self.overlay_alpha = 110
 
         self.on_modified = None
-        self.on_need_sam_ready = None  # editor callback
+        self.on_need_sam_ready = None
 
     def notify_modified(self):
         if callable(self.on_modified):
@@ -288,9 +288,7 @@ class UnifiedCanvas(QWidget):
             else:
                 return
 
-            # SAM은 클릭 시마다 run_sam 필요 -> 그 전에 embedding 준비되어야 함
             if callable(self.on_need_sam_ready) and not self.on_need_sam_ready():
-                # 준비 실패/취소
                 return
 
             self.push_undo()
@@ -334,6 +332,7 @@ class UnifiedCanvas(QWidget):
     def run_sam(self):
         if self.image_bgr is None or len(self.sam_points) == 0:
             return
+
         input_points = np.array(self.sam_points)
         input_labels = np.array(self.sam_labels)
 
@@ -375,13 +374,6 @@ class UnifiedCanvas(QWidget):
 # Main Window
 # ======================
 class UnifiedEditor(QMainWindow):
-    """
-    핵심 변경점:
-    - 파일 이동 시 predictor.set_image()를 호출하지 않음 (빠른 전환)
-    - SAM 모드 버튼을 눌렀을 때(또는 SAM 첫 클릭 시)만 set_image() 수행
-    - set_image 수행 중에는 WaitCursor(로딩 커서) + 상태 메시지 표시
-    - dirty는 baseline mask와 현재 mask 비교로 판단 (Ctrl+Z로 원상복귀하면 dirty 해제)
-    """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Data Annotation - Mask Editor")
@@ -426,31 +418,24 @@ class UnifiedEditor(QMainWindow):
             QLabel { font-size: 14px; color: #495057; font-weight: bold; }
         """)
 
-        self.mask_files = sorted(MASK_DIR.glob("*.png"))
-        if not self.mask_files:
-            QMessageBox.critical(self, "No masks", f"No mask files found in:\n{MASK_DIR}")
+        self.image_files = self.list_input_images()
+        if not self.image_files:
+            QMessageBox.critical(self, "No images", f"No image files found in:\n{IMAGE_DIR}")
             sys.exit(0)
 
-        # start -1 so rowChanged(0) loads at startup
         self.index = -1
         self.current_mask_path: Path | None = None
         self.current_stem: str | None = None
-
-        # track current original image key for this mask
         self.current_image_key: str | None = None
 
-        # baseline dirty compare
         self.baseline_mask: np.ndarray | None = None
         self.dirty = False
 
-        # caches (disk decode)
         self.image_cache = LRUCache(capacity=24)
         self.mask_cache = LRUCache(capacity=48)
 
-        # SAM embedding readiness state
         self.sam_ready_for_image_key: str | None = None
 
-        # Canvas + Scroll
         self.canvas = UnifiedCanvas()
         self.canvas.on_modified = self.recompute_dirty
         self.canvas.on_need_sam_ready = self.ensure_sam_ready_for_current_image
@@ -459,14 +444,12 @@ class UnifiedEditor(QMainWindow):
         self.scroll.setWidget(self.canvas)
         self.scroll.setWidgetResizable(False)
 
-        # Left list
         self.list_widget = QListWidget()
         self.list_widget.setMinimumWidth(300)
         self.list_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.populate_list()
         self.list_widget.currentRowChanged.connect(self.on_list_row_changed)
 
-        # Mode buttons
         self.btn_brush = QToolButton()
         self.btn_brush.setText("🖌️ Brush")
         self.btn_brush.setCheckable(True)
@@ -490,7 +473,6 @@ class UnifiedEditor(QMainWindow):
         self.btn_erase.clicked.connect(self.on_click_erase)
         self.btn_sam.clicked.connect(self.on_click_sam)
 
-        # Actions
         self.btn_open = QPushButton("📂 Open")
         self.btn_save = QPushButton("💾 Save")
         self.btn_prev = QPushButton("◀ Prev")
@@ -512,7 +494,6 @@ class UnifiedEditor(QMainWindow):
         self.status_label.setMinimumWidth(280)
         self.status_label.setStyleSheet("color: #868e96; font-weight: normal;")
 
-        # Layout
         root = QWidget()
         self.setCentralWidget(root)
 
@@ -545,14 +526,12 @@ class UnifiedEditor(QMainWindow):
         layout.addLayout(bottom_bar)
         root.setLayout(layout)
 
-        # Shortcuts
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.canvas.undo)
 
         save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
         save_shortcut.activated.connect(self.save_if_dirty_force)
 
-        # navigation shortcuts
         self.next_shortcut = QShortcut(QKeySequence("D"), self)
         self.next_shortcut.activated.connect(self.next_image)
 
@@ -580,9 +559,14 @@ class UnifiedEditor(QMainWindow):
         self.down_shortcut = QShortcut(QKeySequence(Qt.Key_Down), self)
         self.down_shortcut.activated.connect(lambda: self.scroll_view(0, 80))
 
-
-        # Initial load
         self.list_widget.setCurrentRow(0)
+
+    # ---------- File list ----------
+    def list_input_images(self):
+        files = []
+        for ext in ("*.jpg", "*.png", "*.jpeg", "*.bmp"):
+            files.extend(IMAGE_DIR.glob(ext))
+        return sorted(files)
 
     # ---------- Mode handlers ----------
     def on_click_brush(self):
@@ -593,66 +577,58 @@ class UnifiedEditor(QMainWindow):
         self.canvas.set_mode("erase")
         self.set_status("Eraser mode")
 
-    def scroll_view(self, dx, dy):
-        hbar = self.scroll.horizontalScrollBar()
-        vbar = self.scroll.verticalScrollBar()
-
-        hbar.setValue(hbar.value() + dx)
-        vbar.setValue(vbar.value() + dy)
-
     def on_click_sam(self):
-        # SAM 모드로 바꾸는 시점에 embedding을 준비 (딜레이 로딩)
         self.canvas.set_mode("sam")
         ok = self.ensure_sam_ready_for_current_image()
         if ok:
             self.set_status("SAM mode (ready)")
         else:
-            # 준비 실패면 모드 유지/전환은 선택사항인데,
-            # 여기서는 UX 상 brush로 돌려놓음
             self.btn_brush.setChecked(True)
             self.canvas.set_mode("brush")
 
-    def move_remaining_files(self):
+    def scroll_view(self, dx, dy):
+        hbar = self.scroll.horizontalScrollBar()
+        vbar = self.scroll.verticalScrollBar()
+        hbar.setValue(hbar.value() + dx)
+        vbar.setValue(vbar.value() + dy)
 
+    def move_remaining_files(self):
         moved = 0
 
-        mask_files = list(MASK_DIR.glob("*.png"))
+        image_files = self.list_input_images()
 
-        for mask_path in mask_files:
+        for image_path in image_files:
+            stem = image_path.stem
 
-            stem = mask_path.stem
-
-            # edited 존재 여부 확인
             edited_mask = AFTER_MASK_DIR / f"{stem}_edited.png"
-
             if edited_mask.exists():
                 continue
 
-            label_path = LABEL_DIR / f"{stem}.txt"
-
-            dst_mask = AFTER_MASK_DIR / mask_path.name
-            dst_label = AFTER_LABEL_DIR / label_path.name
-
-            image_path = self.find_image_path(stem)
+            base_mask = MASK_DIR / f"{stem}.png"
+            base_label = LABEL_DIR / f"{stem}.txt"
 
             dst_image = AFTER_IMAGE_DIR / f"{stem}.png"
+            dst_mask = AFTER_MASK_DIR / f"{stem}.png"
+            dst_label = AFTER_LABEL_DIR / f"{stem}.txt"
 
             try:
+                img = cv2.imread(str(image_path))
+                if img is not None:
+                    cv2.imwrite(str(dst_image), img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
-                mask_path.rename(dst_mask)
+                if base_mask.exists():
+                    mask = cv2.imread(str(base_mask), cv2.IMREAD_GRAYSCALE)
+                    if mask is not None:
+                        cv2.imwrite(str(dst_mask), mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
-                if label_path.exists():
-                    label_path.rename(dst_label)
+                if base_label.exists():
+                    with open(base_label, "r", encoding="utf-8") as fsrc, open(dst_label, "w", encoding="utf-8") as fdst:
+                        fdst.write(fsrc.read())
 
                 moved += 1
 
             except Exception as e:
                 print("Move error:", e)
-
-            if image_path and image_path.exists():
-                img = cv2.imread(str(image_path))
-                if img is not None:
-                    cv2.imwrite(str(dst_image), img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
         print(f"Moved remaining files: {moved}")
 
@@ -663,6 +639,7 @@ class UnifiedEditor(QMainWindow):
         cur = self.canvas.get_mask()
         if cur is None:
             return
+
         is_dirty = not np.array_equal(cur, self.baseline_mask)
         if is_dirty != self.dirty:
             self.dirty = is_dirty
@@ -679,7 +656,7 @@ class UnifiedEditor(QMainWindow):
         self.dirty = False
         self.status_label.setStyleSheet("color: #868e96; font-weight: normal;")
 
-    # ---------- Status / Cursor helpers ----------
+    # ---------- Status / Cursor ----------
     def set_status(self, msg: str):
         self.status_label.setText(msg)
 
@@ -712,13 +689,11 @@ class UnifiedEditor(QMainWindow):
         elif ret == QMessageBox.Cancel:
             return False
         else:
-            # discard
             self.set_baseline_from_current()
             self.set_status("Discarded changes")
             return True
 
     def closeEvent(self, event):
-
         if not self.check_unsaved_changes():
             event.ignore()
             return
@@ -732,22 +707,17 @@ class UnifiedEditor(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-
             self.move_remaining_files()
             event.accept()
-
         elif reply == QMessageBox.No:
-
             event.accept()
-
         else:
-
             event.ignore()
 
     # ---------- UI list ----------
     def populate_list(self):
         self.list_widget.clear()
-        for p in self.mask_files:
+        for p in self.image_files:
             item = QListWidgetItem(p.name)
             item.setData(Qt.UserRole, str(p))
             self.list_widget.addItem(item)
@@ -755,7 +725,7 @@ class UnifiedEditor(QMainWindow):
     def on_list_row_changed(self, row: int):
         if row < 0 or row >= self.list_widget.count():
             return
-        if row == self.index and self.current_mask_path is not None:
+        if row == self.index and self.current_image_key is not None:
             return
 
         if not self.check_unsaved_changes():
@@ -767,15 +737,15 @@ class UnifiedEditor(QMainWindow):
         item = self.list_widget.item(row)
         path = Path(item.data(Qt.UserRole))
         self.index = row
-        self.load_mask_path(path)
+        self.load_image_path(path)
 
     def open_file_dialog(self):
-        start_dir = str(MASK_DIR)
+        start_dir = str(IMAGE_DIR)
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open mask PNG",
+            "Open image",
             start_dir,
-            "PNG Images (*.png)"
+            "Images (*.png *.jpg *.jpeg *.bmp)"
         )
         if not file_path:
             return
@@ -789,12 +759,12 @@ class UnifiedEditor(QMainWindow):
                 self.list_widget.setCurrentRow(i)
                 return
 
-        self.load_mask_path(p)
+        self.load_image_path(p)
         self.set_status(f"Opened (external): {p.name}")
 
     # ---------- Loading ----------
     def find_image_path(self, image_key: str) -> Path | None:
-        for ext in ("jpg", "png", "jpeg"):
+        for ext in ("jpg", "png", "jpeg", "bmp"):
             cand = IMAGE_DIR / f"{image_key}.{ext}"
             if cand.exists():
                 return cand
@@ -839,12 +809,10 @@ class UnifiedEditor(QMainWindow):
         return mask
 
     def fit_image_to_view(self):
-
         if self.canvas.image_rgb is None:
             return
 
         img_h, img_w = self.canvas.image_rgb.shape[:2]
-
         view_w = self.scroll.viewport().width()
         view_h = self.scroll.viewport().height()
 
@@ -860,77 +828,64 @@ class UnifiedEditor(QMainWindow):
 
         self.focus_on_mask()
 
-    def load_mask_path(self, mask_path: Path):
-
-        if not mask_path.exists():
-            QMessageBox.warning(self, "Missing file", f"Mask not found:\n{mask_path}")
+    def load_image_path(self, image_path: Path):
+        if not image_path.exists():
+            QMessageBox.warning(self, "Missing file", f"Image not found:\n{image_path}")
             return
 
-        stem = mask_path.stem
+        stem = image_path.stem
+        image_key = stem
 
-        # edited mask 우선 로드
         edited_mask_path = AFTER_MASK_DIR / f"{stem}_edited.png"
+        base_mask_path = MASK_DIR / f"{stem}.png"
 
         if edited_mask_path.exists():
             mask_to_load = edited_mask_path
+        elif base_mask_path.exists():
+            mask_to_load = base_mask_path
         else:
-            mask_to_load = mask_path
-
-        instance_id = parse_instance_id_from_stem(stem)
-        image_key = instance_id
-
-        image_path = self.find_image_path(image_key)
-
-        if image_path is None:
-            QMessageBox.warning(
-                self,
-                "Missing image",
-                f"Image not found for:\n{image_key}\nin\n{IMAGE_DIR}"
-            )
-            return
+            mask_to_load = None
 
         img_bgr = self._read_image_cached(image_path)
-
         if img_bgr is None:
             QMessageBox.warning(self, "Read fail", f"Failed to read image:\n{image_path}")
             return
 
-        mask = self._read_mask_cached(mask_to_load)
+        h, w = img_bgr.shape[:2]
 
-        if mask is None:
-            QMessageBox.warning(self, "Read fail", f"Failed to read mask:\n{mask_to_load}")
-            return
+        if mask_to_load is not None:
+            mask = self._read_mask_cached(mask_to_load)
+            if mask is None:
+                QMessageBox.warning(self, "Read fail", f"Failed to read mask:\n{mask_to_load}")
+                return
+        else:
+            mask = np.zeros((h, w), dtype=np.uint8)
 
-        # GUI 내부 상태는 original stem 기준 유지
-        self.current_mask_path = mask_path
+        self.current_mask_path = base_mask_path
         self.current_stem = stem
         self.current_image_key = image_key
 
-        # IMPORTANT: 파일 이동 시 SAM embedding은 준비하지 않음
-        self.canvas.set_data(img_bgr, mask)
+        self.sam_ready_for_image_key = None
 
-        # baseline reset
+        self.canvas.set_data(img_bgr, mask)
         self.set_baseline_from_current()
 
-        if mask_to_load == edited_mask_path:
+        if edited_mask_path.exists():
             self.set_status(f"Loaded (edited): {stem}")
+        elif base_mask_path.exists():
+            self.set_status(f"Loaded: {stem}")
         else:
-            self.set_status(f"Loaded: {mask_path.name}")
+            self.set_status(f"Loaded (new / empty mask): {stem}")
 
         QTimer.singleShot(0, self.fit_image_to_view)
 
     # ---------- SAM lazy embedding ----------
     def ensure_sam_ready_for_current_image(self) -> bool:
-        """
-        현재 로드된 원본 이미지 기준으로 predictor.set_image()가 되어있지 않으면 수행.
-        수행 중에는 로딩 커서(WaitCursor)로 표시.
-        """
         if self.current_image_key is None:
             return False
         if self.sam_ready_for_image_key == self.current_image_key:
             return True
 
-        # 이미지가 canvas에 이미 세팅되어 있으니 canvas.image_bgr를 사용
         img_bgr = self.canvas.image_bgr
         if img_bgr is None:
             return False
@@ -946,7 +901,7 @@ class UnifiedEditor(QMainWindow):
 
     # ---------- Saving ----------
     def save_if_dirty_force(self):
-        if self.current_mask_path is None or self.current_stem is None:
+        if self.current_stem is None:
             return
         if not self.dirty:
             self.set_status("No changes")
@@ -954,7 +909,6 @@ class UnifiedEditor(QMainWindow):
         self._save_current()
 
     def _save_current(self):
-
         mask = self.canvas.get_mask()
         if mask is None or self.current_stem is None:
             return
@@ -962,55 +916,45 @@ class UnifiedEditor(QMainWindow):
         stem = self.current_stem
 
         image_save_path = AFTER_IMAGE_DIR / f"{stem}.png"
-
         if self.canvas.image_bgr is not None:
-            cv2.imwrite(str(image_save_path), self.canvas.image_bgr,
-                        [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            cv2.imwrite(str(image_save_path), self.canvas.image_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
-        # class id from filename
-        # ex) 2_15 -> class_id = 1
         parts = stem.split("_")
+        try:
+            if parts[0].isnumeric():
+                class_id = int(parts[0]) - 1
+            else:
+                class_id = int(parts[1]) - 1
+        except Exception:
+            QMessageBox.warning(self, "Filename error", f"Cannot infer class id from filename:\n{stem}")
+            return
 
-        if parts[0].isnumeric():
-            class_id = int(parts[0]) - 1
-        else:
-            class_id = int(parts[1]) - 1
-
-        # save edited mask
         save_mask_path = AFTER_MASK_DIR / f"{stem}_edited.png"
-
         ok = cv2.imwrite(str(save_mask_path), mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         if not ok:
             QMessageBox.warning(self, "Save failed", f"Failed to write:\n{save_mask_path}")
             return
 
-        # polygon extraction
         bbox, poly = mask_to_bbox_and_polygon(mask)
-
         if bbox is None or poly is None or len(poly) < 3:
             QMessageBox.warning(self, "Invalid mask", f"Empty/invalid mask:\n{stem}")
             return
 
         h, w = mask.shape
-
         poly_norm = []
 
         for px, py in poly:
-
             xn = px / (w - 1)
             yn = py / (h - 1)
-
             poly_norm.append(f"{xn:.6f}")
             poly_norm.append(f"{yn:.6f}")
 
         line = str(class_id) + " " + " ".join(poly_norm)
 
         dst_label_path = AFTER_LABEL_DIR / f"{stem}.txt"
-
-        with open(dst_label_path, "w") as f:
+        with open(dst_label_path, "w", encoding="utf-8") as f:
             f.write(line + "\n")
 
-        # baseline update
         self.set_baseline_from_current()
         self.set_status(f"✅ Saved: {stem}")
 
@@ -1032,9 +976,6 @@ class UnifiedEditor(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    # (선택) 폰트 경고/플랫폼 폰트 불안정 방지
-    from PySide6.QtGui import QFont
     app.setFont(QFont("Segoe UI", 10))
 
     win = UnifiedEditor()
