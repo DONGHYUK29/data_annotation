@@ -2,19 +2,31 @@
 # Dataset / generated data
 # =========================
 
-create/input/
-create/output_1/
-create/output_2/
-create/dataset/
-create/training/
+create/input/*
+create/output_1/*
+create/output_2/*
+create/dataset/*
+create/training/*
 
-images/original/
-images/yolo_seg_results/
-images/edited_results/
+images/original/*
+images/yolo_seg_results/*
+images/edited_results/*
 
-output/
+output/*
+runs/*
 
-runs/
+!create/input/.gitkeep
+!create/output_1/.gitkeep
+!create/output_2/.gitkeep
+!create/dataset/.gitkeep
+!create/training/.gitkeep
+
+!images/original/.gitkeep
+!images/yolo_seg_results/.gitkeep
+!images/edited_results/.gitkeep
+
+!output/.gitkeep
+!runs/.gitkeep
 
 # =========================
 # RealSense bag files
@@ -22,7 +34,12 @@ runs/
 
 *.bag
 bag_*/
+bag/**
+!bag/
+!bag/**/
 
+!bag/.gitkeep
+!bag/**/.gitkeep
 
 # =========================
 # Model weights
