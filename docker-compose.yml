@@ -1,17 +1,20 @@
-
 services:
-  app:
-    build: .
-    # GPU를 도커가 인식하게 만드는 핵심 설정
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  annotation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu121
+    image: data-annotation-sw:gpu
+    working_dir: /app
     volumes:
       - .:/app
-    # 만약 웹 화면(Streamlit 등)이 있다면 아래 포트 주석 해제
-    # ports:
-    #   - "8501:8501"
+    ports:
+      - "7860:7860"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - ANNOTATION_WEB_HOST=0.0.0.0
+      - ANNOTATION_WEB_PORT=7860
+    gpus: all
+    command: ["python", "-m", "uvicorn", "pipeline.web_gui:app", "--host", "0.0.0.0", "--port", "7860"]

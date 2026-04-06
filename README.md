@@ -162,7 +162,7 @@ python run.py gui
 python run.py export --bg paper --mode copy
 ```
 
-- `--bg` (필수): `paper`, `floor`, `desk` 등  
+- `--bg` (필수): 환경 - `paper`, `floor`, `desk`, 작업 순서 - '4-1', '27' 등  
 - `--mode`: `copy` 또는 `move`  
 
 #### Train / Val 분할 (`build`)
@@ -215,8 +215,8 @@ python run.py
 
 ## Docker 실행
 
-로컬 venv와 **같은 계열**(Python 3.10, pyrealsense2·ultralytics·PySide6·segment_anything·CLIP)을 컨테이너에 맞췄습니다.  
-Docker 이미지 안의 PyTorch는 **공식 안정 cu121 휠**을 씁니다. (로컬의 `torch 2.12 nightly cu128` 과 버전 문자열은 다를 수 있으나, 동작 목적은 동일합니다.)
+로컬 `venv`와 최대한 동일하게 맞추기 위해 `requirements-docker.txt`는 **`pip freeze` 기준으로 고정 버전**을 생성해 Docker에 사용합니다.  
+Dockerfile에서는 `torch/torchvision/torchaudio`만 `TORCH_INDEX`(기본: cu121)로 설치하고, 나머지는 `requirements-docker.txt`에서 그대로 설치합니다.
 
 ### 사전 요구
 
@@ -256,10 +256,23 @@ docker compose run --rm annotation python run.py extract --start 1 --end 5 --cou
 
 ### GUI in Docker
 
-컨테이너 기본값은 `QT_QPA_PLATFORM=offscreen` 이라 **윈도 없이** 동작하는 CLI 위주에 맞춰져 있습니다.  
-GUI를 컨테이너에서 쓰려면 Linux 호스트에서 X11 전달, 또는 **Windows에서는 GUI만 로컬 venv에서 `python run.py gui`** 로 실행하는 방식을 권장합니다.
+GUI를 Docker에서 실제로 화면에 띄우려면 **X11 forwarding**이 필요합니다.
 
-(Linux 예시 개념: `DISPLAY`, `/tmp/.X11-unix` 마운트, `xhost +local:` 등 — 보안·환경에 맞게 조정.)
+`docker-compose.yml`에 GUI용 서비스인 `annotation_gui`를 추가해 두었습니다.
+아래로 실행하면 컨테이너의 GUI가 호스트 X 서버로 표시됩니다.
+
+#### 1) X 서버 준비
+- Linux/WSL2: 호스트에서 X 서버가 떠 있어야 합니다.
+- Windows: VcXsrv/Xming 같은 X 서버를 먼저 실행하고, “TCP 연결 허용(접근제어 off)” 또는 동등한 설정을 해주세요.
+
+#### 2) 실행
+프로젝트 루트에서:
+
+```bash
+docker compose run --rm annotation_gui python run.py gui
+```
+
+`annotation_gui`는 기본적으로 `DISPLAY=${DISPLAY:-host.docker.internal:0}` 로 설정하고, `QT_QPA_PLATFORM=xcb`로 강제합니다.
 
 ### `.dockerignore`
 

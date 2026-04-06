@@ -41,7 +41,7 @@ weights/
 *.jpg
 *.jpeg
 *.bmp
-*.txt
+
 
 
 # =========================
@@ -59,3 +59,10 @@ __pycache__/
 
 .vscode/
 .idea/
+
+# virtualenv
+venv/
+.env/
+
+# pipeline
+pipeline/__pycache__/
