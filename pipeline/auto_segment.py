@@ -32,7 +32,7 @@ def batch_list(data: list, size: int):
 
 def get_class_id_from_stem(stem: str) -> int:
     x = int(stem.split("_")[0])
-    return x - 1
+    return x
 
 
 def mask_to_polygon(mask: np.ndarray):
