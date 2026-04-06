@@ -37,4 +37,4 @@ COPY . /app
 
 EXPOSE 7860
 
-CMD ["python", "-m", "uvicorn", "pipeline.web_gui:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["python", "-m", "uvicorn", "pipeline.gui_app:app", "--host", "0.0.0.0", "--port", "7860"]

@@ -17,4 +17,4 @@ services:
       - ANNOTATION_WEB_HOST=0.0.0.0
       - ANNOTATION_WEB_PORT=7860
     gpus: all
-    command: ["python", "-m", "uvicorn", "pipeline.web_gui:app", "--host", "0.0.0.0", "--port", "7860"]
+    command: ["python", "-m", "uvicorn", "pipeline.gui_app:app", "--host", "0.0.0.0", "--port", "7860"]
