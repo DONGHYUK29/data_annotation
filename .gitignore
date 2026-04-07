@@ -48,6 +48,7 @@ bag/**
 *.pt
 *.pth
 weights/
+!weights/.gitkeep
 
 
 # =========================
