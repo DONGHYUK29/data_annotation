@@ -47,9 +47,9 @@ bag/**
 
 *.pt
 *.pth
-weights/
+!weights/
+weights/*
 !weights/.gitkeep
-
 
 # =========================
 # Large files
