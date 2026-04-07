@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, Response
 from PIL import Image
 
 import config as cfg
+from .sam_backend import predict_sam_mask
 
 cfg.ensure_stage_dirs()
 
@@ -22,7 +23,7 @@ AFTER_IMAGE_DIR = cfg.STAGE2_IMAGES
 AFTER_MASK_DIR = cfg.STAGE2_MASKS
 AFTER_LABEL_DIR = cfg.STAGE2_LABELS
 
-app = FastAPI(title="Annotation Web GUI")
+app = FastAPI(title="Annotation Web GUI + SAM Point Assist")
 
 MASK_ALPHA = 110
 MASK_RGBA = (0, 255, 0, MASK_ALPHA)
@@ -266,6 +267,50 @@ def api_meta(stem: str):
     }
 
 
+@app.post("/api/sam_predict/{stem}")
+async def api_sam_predict(stem: str, request: Request):
+    payload = await request.json()
+    points = payload.get("points", [])
+
+    if not points:
+        raise HTTPException(status_code=400, detail="points are required")
+
+    image_path = get_display_image_path(stem)
+    if image_path is None or not image_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    image_bgr = read_img_safe(image_path, cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise HTTPException(status_code=500, detail="Failed to read image")
+
+    try:
+        point_coords = np.array([[float(p["x"]), float(p["y"])] for p in points], dtype=np.float32)
+        point_labels = np.array([int(p["label"]) for p in points], dtype=np.int32)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid points payload: {e}")
+
+    try:
+        mask = predict_sam_mask(
+            image_bgr=image_bgr,
+            point_coords=point_coords,
+            point_labels=point_labels,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SAM inference failed: {e}")
+
+    if mask is None:
+        raise HTTPException(status_code=500, detail="SAM returned None")
+
+    if mask.dtype != np.uint8:
+        mask = mask.astype(np.uint8)
+
+    if mask.ndim != 2:
+        raise HTTPException(status_code=500, detail="SAM mask must be HxW")
+
+    mask = np.where(mask > 127, 255, 0).astype(np.uint8)
+    return png_response_from_array(mask)
+
+
 @app.post("/api/save/{stem}")
 async def api_save(stem: str, request: Request):
     ensure_output_dirs()
@@ -299,6 +344,14 @@ async def api_save(stem: str, request: Request):
     image_save_path = AFTER_IMAGE_DIR / f"{stem}.png"
     mask_save_path = AFTER_MASK_DIR / f"{stem}_edited.png"
     label_save_path = AFTER_LABEL_DIR / f"{stem}.txt"
+
+    # 기존 copy본이 있으면 삭제
+    copied_mask_path = AFTER_MASK_DIR / f"{stem}.png"
+    if copied_mask_path.exists():
+        try:
+            copied_mask_path.unlink()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to remove old copied mask: {e}")
 
     ok_img = write_img_safe(image_save_path, original_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
     ok_mask = write_img_safe(mask_save_path, mask, [cv2.IMWRITE_PNG_COMPRESSION, 1])
@@ -346,7 +399,7 @@ HTML_PAGE = r"""
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>Annotation Web GUI</title>
+  <title>Annotation Web GUI + SAM Point Assist</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -416,6 +469,11 @@ HTML_PAGE = r"""
     #maskCanvas {
       z-index: 2;
       cursor: none;
+    }
+
+    #promptCanvas {
+      z-index: 3;
+      pointer-events: none;
     }
 
     #cursorOverlay {
@@ -498,6 +556,22 @@ HTML_PAGE = r"""
       line-height: 1.45;
       color: #475467;
     }
+
+    .sam-help {
+      margin-top: 10px;
+      padding: 10px;
+      background: #f7f9fc;
+      border: 1px solid #e3e8ef;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #475467;
+    }
+
+    .sam-help b {
+      display: inline-block;
+      margin-bottom: 4px;
+    }
   </style>
 </head>
 <body>
@@ -511,6 +585,13 @@ HTML_PAGE = r"""
       아직 수정하지 않은 이미지들에 대해<br>
       output_1 결과를 output_2로 그대로 복사합니다.<br>
       즉, 편집 안 한 것도 최종본으로 넘기는 기능입니다.
+    </div>
+
+    <div class="sam-help">
+      <b>SAM Point Assist</b><br>
+      좌클릭: Positive point + 즉시 SAM 실행<br>
+      우클릭: Negative point + 즉시 SAM 실행<br>
+      결과는 기존 마스크를 덮어쓰고, 이후 Brush/Eraser로 수정 가능
     </div>
 
     <div style="margin: 10px 0;">
@@ -533,6 +614,7 @@ HTML_PAGE = r"""
       <div class="bottom-left">
         <button id="brushBtn" class="active" onclick="setMode('brush')">🖌️ Brush</button>
         <button id="eraseBtn" onclick="setMode('erase')">🧽 Eraser</button>
+        <button id="samPointBtn" onclick="setMode('sam_point')">🎯 SAM Point</button>
 
         <label>Brush Size
           <input type="range" id="brushSize" min="1" max="80" value="10" />
@@ -572,12 +654,15 @@ let zoom = 1.0;
 let undoStack = [];
 let isDirty = false;
 let isLoading = false;
+let isSamRunning = false;
+let samPoints = [];
 
 const MASK_DRAW_COLOR = "rgba(0,255,0,0.43)";
 const MASK_DRAW_ALPHA_THRESHOLD = 20;
 
 const baseCanvas = document.getElementById("baseCanvas");
 const maskCanvas = document.getElementById("maskCanvas");
+
 const baseCtx = baseCanvas.getContext("2d");
 const maskCtx = maskCanvas.getContext("2d");
 
@@ -608,7 +693,15 @@ function setMode(newMode) {
   mode = newMode;
   document.getElementById("brushBtn").classList.toggle("active", mode === "brush");
   document.getElementById("eraseBtn").classList.toggle("active", mode === "erase");
-  setStatus(mode === "brush" ? "Brush mode" : "Eraser mode");
+  document.getElementById("samPointBtn").classList.toggle("active", mode === "sam_point");
+
+  if (mode === "brush") {
+    setStatus("Brush mode");
+  } else if (mode === "erase") {
+    setStatus("Eraser mode");
+  } else {
+    setStatus("SAM point mode (left=positive, right=negative, auto-run)");
+  }
   updateCursor();
 }
 
@@ -678,9 +771,14 @@ function drawLine(x0, y0, x1, y1) {
 }
 
 function updateCursor(evt = null) {
-  const diameter = parseInt(brushSizeEl.value, 10) * 2 * zoom;
-  cursorOverlayEl.style.width = `${Math.max(2, diameter)}px`;
-  cursorOverlayEl.style.height = `${Math.max(2, diameter)}px`;
+  if (mode === "sam_point") {
+    cursorOverlayEl.style.width = "14px";
+    cursorOverlayEl.style.height = "14px";
+  } else {
+    const diameter = parseInt(brushSizeEl.value, 10) * 2 * zoom;
+    cursorOverlayEl.style.width = `${Math.max(2, diameter)}px`;
+    cursorOverlayEl.style.height = `${Math.max(2, diameter)}px`;
+  }
 
   if (!evt) return;
   const rect = canvasStackEl.getBoundingClientRect();
@@ -689,6 +787,12 @@ function updateCursor(evt = null) {
   cursorOverlayEl.style.left = `${x}px`;
   cursorOverlayEl.style.top = `${y}px`;
 }
+
+maskCanvas.addEventListener("contextmenu", (e) => {
+  if (mode === "sam_point") {
+    e.preventDefault();
+  }
+});
 
 maskCanvas.addEventListener("mouseenter", () => {
   cursorOverlayEl.style.display = "block";
@@ -701,9 +805,25 @@ maskCanvas.addEventListener("mouseleave", () => {
 
 maskCanvas.addEventListener("mousedown", (evt) => {
   if (!currentStem || isLoading) return;
+
+  const p = getPointerPos(evt);
+
+  if (mode === "sam_point") {
+    const isRight = evt.button === 2;
+
+    samPoints.push({
+      x: p.x,
+      y: p.y,
+      label: isRight ? 0 : 1,
+    });
+
+    updateCursor(evt);
+    runSam(true);
+    return;
+  }
+
   drawing = true;
   pushUndo();
-  const p = getPointerPos(evt);
   maskCanvas.dataset.lastX = String(p.x);
   maskCanvas.dataset.lastY = String(p.y);
   drawDot(p.x, p.y);
@@ -844,6 +964,7 @@ async function loadByIndex(idx, opts = {}) {
     baseCtx.drawImage(img, 0, 0);
     maskCtx.drawImage(mask, 0, 0);
 
+    samPoints = [];
     undoStack = [];
 
     const infoText = `${metaRes.stem} | ${metaRes.width}×${metaRes.height} | class ${metaRes.class_id}`;
@@ -877,6 +998,80 @@ function loadImage(url) {
     img.onerror = () => reject(new Error("Image decode failed"));
     img.src = url;
   });
+}
+
+function applyBinaryMaskToMaskCanvas(binaryCanvasOrImage) {
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = maskCanvas.width;
+  tempCanvas.height = maskCanvas.height;
+  const tempCtx = tempCanvas.getContext("2d");
+  tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
+  tempCtx.drawImage(binaryCanvasOrImage, 0, 0, tempCanvas.width, tempCanvas.height);
+
+  const src = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+  const out = maskCtx.createImageData(maskCanvas.width, maskCanvas.height);
+
+  for (let i = 0; i < src.data.length; i += 4) {
+    const v = src.data[i];
+    const on = v > 127;
+    if (on) {
+      out.data[i] = 0;
+      out.data[i + 1] = 255;
+      out.data[i + 2] = 0;
+      out.data[i + 3] = 110;
+    } else {
+      out.data[i] = 0;
+      out.data[i + 1] = 0;
+      out.data[i + 2] = 0;
+      out.data[i + 3] = 0;
+    }
+  }
+
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  maskCtx.putImageData(out, 0, 0);
+}
+
+async function runSam(silent = false) {
+  if (!currentStem) return false;
+  if (samPoints.length === 0) return false;
+  if (isSamRunning) return false;
+
+  isSamRunning = true;
+  setStatus("Running SAM...");
+
+  try {
+    const res = await fetch(`/api/sam_predict/${encodeURIComponent(currentStem)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ points: samPoints })
+    });
+
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t);
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const samMaskImg = await loadImage(url);
+
+    pushUndo();
+    applyBinaryMaskToMaskCanvas(samMaskImg);
+    setDirty(true);
+    setStatus("SAM applied");
+
+    URL.revokeObjectURL(url);
+    return true;
+  } catch (err) {
+    console.error(err);
+    setStatus("SAM failed");
+    if (!silent) {
+      alert(String(err));
+    }
+    return false;
+  } finally {
+    isSamRunning = false;
+  }
 }
 
 async function saveCurrent(silent = false) {
@@ -963,6 +1158,8 @@ window.addEventListener("keydown", async (e) => {
     setMode("brush");
   } else if (e.key === "2") {
     setMode("erase");
+  } else if (e.key === "3") {
+    setMode("sam_point");
   } else if (e.key.toLowerCase() === "a") {
     await prevImage();
   } else if (e.key.toLowerCase() === "d") {
