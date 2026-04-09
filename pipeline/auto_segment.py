@@ -31,42 +31,7 @@ def batch_list(data: list, size: int):
 
 
 def get_class_id_from_stem(stem: str) -> int:
-    x = int(stem.split("_")[0])
-    return x
-
-
-def mask_to_polygon(mask: np.ndarray):
-    contours, _ = cv2.findContours(
-        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-    )
-    if not contours:
-        return None
-
-    cnt = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(cnt) < 10:
-        return None
-
-    perimeter = cv2.arcLength(cnt, True)
-    epsilon = 0.002 * perimeter
-    approx = cv2.approxPolyDP(cnt, epsilon, True)
-    poly = approx.reshape(-1, 2)
-
-    if len(poly) < 3:
-        return None
-
-    return poly.astype(np.float32)
-
-
-def normalize_polygon(poly, w: int, h: int):
-    poly_out = []
-    denom_w = max(w - 1, 1)
-    denom_h = max(h - 1, 1)
-
-    for x, y in poly:
-        poly_out.append(float(x) / denom_w)
-        poly_out.append(float(y) / denom_h)
-
-    return poly_out
+    return int(stem.split("_")[0])
 
 
 def save_label(path: Path, class_id: int, poly_norm: list[float]) -> None:
@@ -80,12 +45,12 @@ def create_overlay(image: np.ndarray, mask: np.ndarray):
     return cv2.addWeighted(image, 1.0, colored, 0.5, 0)
 
 
-def select_best_mask(results):
+def select_best_instance(results):
     """
-    YOLO-seg 결과에서 confidence가 가장 높은 instance 하나의 mask를 선택.
+    confidence가 가장 높은 instance 하나를 선택.
     반환:
-        mask_uint8: (H, W), 값 0 또는 255
-        pred_cls_id: 예측 클래스 id (없으면 None)
+        best_idx: 선택된 instance index
+        pred_cls_id: 예측 클래스 id
     """
     if results.boxes is None or len(results.boxes) == 0:
         return None, None
@@ -99,17 +64,51 @@ def select_best_mask(results):
 
     best_idx = int(np.argmax(scores))
 
-    masks = results.masks.data.detach().cpu().numpy()  # [N, H, W]
-    if best_idx >= len(masks):
-        return None, None
-
-    mask = (masks[best_idx] > 0.5).astype(np.uint8) * 255
-
     pred_cls_id = None
     if results.boxes.cls is not None and len(results.boxes.cls) > best_idx:
         pred_cls_id = int(results.boxes.cls[best_idx].item())
 
-    return mask, pred_cls_id
+    return best_idx, pred_cls_id
+
+
+def get_mask_and_polygon_from_results(results, best_idx: int):
+    """
+    Ultralytics가 제공하는 결과에서
+    - mask: 저장/overlay용 uint8 mask
+    - poly_norm: YOLO-seg txt 저장용 normalized polygon
+    을 직접 추출한다.
+    """
+    if results.masks is None or results.masks.data is None:
+        return None, None
+
+    if best_idx >= len(results.masks.data):
+        return None, None
+
+    mask = results.masks.data[best_idx].detach().cpu().numpy()
+    mask = (mask > 0.5).astype(np.uint8) * 255
+
+    if not hasattr(results.masks, "xyn"):
+        return mask, None
+
+    segs = results.masks.xyn
+    if segs is None or best_idx >= len(segs):
+        return mask, None
+
+    poly = segs[best_idx]
+    if poly is None or len(poly) < 3:
+        return mask, None
+
+    poly = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
+
+    poly_norm = []
+    for x, y in poly:
+        poly_norm.append(float(x))
+        poly_norm.append(float(y))
+
+    if len(poly_norm) < 6:
+        return mask, None
+
+    return mask, poly_norm
 
 
 @torch.inference_mode()
@@ -164,29 +163,24 @@ def run_segmentation(
             conf=conf,
             verbose=False,
             device=0 if device == "cuda" else "cpu",
+            retina_masks=True,
         )
 
         for img_path, img, results in zip(valid_paths, images, results_list):
-            h, w = img.shape[:2]
-
-            mask, pred_cls_id = select_best_mask(results)
-            if mask is None:
+            best_idx, pred_cls_id = select_best_instance(results)
+            if best_idx is None:
                 continue
 
             detect_count += 1
 
-            poly = mask_to_polygon(mask)
-            if poly is None:
-                continue
-
-            poly_norm = normalize_polygon(poly, w, h)
-            if len(poly_norm) < 6:
+            mask, poly_norm = get_mask_and_polygon_from_results(results, best_idx)
+            if mask is None or poly_norm is None:
                 continue
 
             stem = img_path.stem
 
+            # 파일명 prefix 기준 클래스 사용
             class_id = get_class_id_from_stem(stem)
-
 
             mask_path = mask_dir / f"{stem}.png"
             label_path = label_dir / f"{stem}.txt"
