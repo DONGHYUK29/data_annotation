@@ -34,8 +34,22 @@ def get_class_id_from_stem(stem: str) -> int:
     return int(stem.split("_")[0])
 
 
-def save_label(path: Path, class_id: int, poly_norm: list[float]) -> None:
-    line = str(class_id) + "".join(f" {v:.6f}" for v in poly_norm)
+def save_label(
+    path: Path,
+    class_id: int,
+    bbox_xywhn: list[float],
+    poly_norm: list[float],
+) -> None:
+    """
+    저장 형식:
+    class xc yc w h x1 y1 x2 y2 ...
+    """
+    if len(bbox_xywhn) != 4:
+        raise ValueError(f"bbox_xywhn must have length 4, got {len(bbox_xywhn)}")
+
+    xc, yc, w, h = [float(v) for v in bbox_xywhn]
+    values = [class_id, xc, yc, w, h, *[float(v) for v in poly_norm]]
+    line = str(values[0]) + "".join(f" {float(v):.6f}" for v in values[1:])
     path.write_text(line + "\n", encoding="utf-8")
 
 
@@ -46,12 +60,6 @@ def create_overlay(image: np.ndarray, mask: np.ndarray):
 
 
 def select_best_instance(results):
-    """
-    confidence가 가장 높은 instance 하나를 선택.
-    반환:
-        best_idx: 선택된 instance index
-        pred_cls_id: 예측 클래스 id
-    """
     if results.boxes is None or len(results.boxes) == 0:
         return None, None
 
@@ -71,44 +79,57 @@ def select_best_instance(results):
     return best_idx, pred_cls_id
 
 
-def get_mask_and_polygon_from_results(results, best_idx: int):
-    """
-    Ultralytics가 제공하는 결과에서
-    - mask: 저장/overlay용 uint8 mask
-    - poly_norm: YOLO-seg txt 저장용 normalized polygon
-    을 직접 추출한다.
-    """
+def get_mask_polygon_and_bbox_from_results(results, best_idx: int):
     if results.masks is None or results.masks.data is None:
-        return None, None
+        return None, None, None
+
+    if results.boxes is None or len(results.boxes) == 0:
+        return None, None, None
 
     if best_idx >= len(results.masks.data):
-        return None, None
+        return None, None, None
+
+    if results.boxes.xywhn is None or len(results.boxes.xywhn) <= best_idx:
+        return None, None, None
 
     mask = results.masks.data[best_idx].detach().cpu().numpy()
     mask = (mask > 0.5).astype(np.uint8) * 255
 
     if not hasattr(results.masks, "xyn"):
-        return mask, None
+        return mask, None, None
 
     segs = results.masks.xyn
     if segs is None or best_idx >= len(segs):
-        return mask, None
+        return mask, None, None
 
     poly = segs[best_idx]
     if poly is None or len(poly) < 3:
-        return mask, None
+        return mask, None, None
 
     poly = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
 
-    poly_norm = []
+    poly_norm: list[float] = []
     for x, y in poly:
         poly_norm.append(float(x))
         poly_norm.append(float(y))
 
     if len(poly_norm) < 6:
-        return mask, None
+        return mask, None, None
 
-    return mask, poly_norm
+    bbox_xywhn = (
+        results.boxes.xywhn[best_idx]
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+        .reshape(-1)
+        .tolist()
+    )
+
+    if len(bbox_xywhn) != 4:
+        return mask, poly_norm, None
+
+    return mask, poly_norm, bbox_xywhn
 
 
 @torch.inference_mode()
@@ -121,9 +142,11 @@ def run_segmentation(
 ) -> None:
     input_dir = input_dir or cfg.IMAGES_RAW_DIR
     out_root = out_dir or cfg.STAGE1_DIR
+
     mask_dir = out_root / "masks"
     label_dir = out_root / "labels"
     overlay_dir = out_root / "images"
+
     mask_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -173,13 +196,13 @@ def run_segmentation(
 
             detect_count += 1
 
-            mask, poly_norm = get_mask_and_polygon_from_results(results, best_idx)
-            if mask is None or poly_norm is None:
+            mask, poly_norm, bbox_xywhn = get_mask_polygon_and_bbox_from_results(
+                results, best_idx
+            )
+            if mask is None or poly_norm is None or bbox_xywhn is None:
                 continue
 
             stem = img_path.stem
-
-            # 파일명 prefix 기준 클래스 사용
             class_id = get_class_id_from_stem(stem)
 
             mask_path = mask_dir / f"{stem}.png"
@@ -188,7 +211,8 @@ def run_segmentation(
 
             cv2.imwrite(str(mask_path), mask)
             cv2.imwrite(str(overlay_path), create_overlay(img, mask))
-            save_label(label_path, class_id, poly_norm)
+            save_label(label_path, class_id, bbox_xywhn, poly_norm)
+
             save_count += 1
 
     print("\nSUMMARY")

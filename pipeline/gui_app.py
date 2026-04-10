@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, Response
 from PIL import Image
 
 import config as cfg
+
 from .sam_backend import predict_sam_mask
 
 cfg.ensure_stage_dirs()
@@ -86,9 +87,9 @@ def stem_to_class_id(stem: str) -> int:
     parts = stem.split("_")
     try:
         if parts[0].isnumeric():
-            return int(parts[0]) - 1
+            return int(parts[0])
         if len(parts) > 1 and parts[1].isnumeric():
-            return int(parts[1]) - 1
+            return int(parts[1])
     except Exception:
         pass
     return 0
@@ -374,7 +375,17 @@ async def api_save(stem: str, request: Request):
             poly_norm.append(f"{xn:.6f}")
             poly_norm.append(f"{yn:.6f}")
 
-        line = str(class_id) + " " + " ".join(poly_norm)
+        x1, y1, x2, y2 = bbox
+
+        xc = ((x1 + x2) / 2.0) / w
+        yc = ((y1 + y2) / 2.0) / h
+        bw = (x2 - x1) / w
+        bh = (y2 - y1) / h
+
+        bbox_norm = [f"{xc:.6f}", f"{yc:.6f}", f"{bw:.6f}", f"{bh:.6f}"]
+
+        line = str(class_id) + " " + " ".join(bbox_norm + poly_norm)
+
         label_save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(label_save_path, "w", encoding="utf-8") as f:
             f.write(line + "\n")
