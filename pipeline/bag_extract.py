@@ -1,4 +1,4 @@
-"""ROS bag (.bag) → 프레임 이미지 추출."""
+"""(.bag) → RGB 이미지 + RGB-D 원본 추출."""
 from __future__ import annotations
 
 import argparse
@@ -16,20 +16,29 @@ if str(ROOT) not in sys.path:
 import config as cfg
 
 
-def process_bag(bag_path: Path, output_dir: Path, target_count: int) -> None:
+def process_bag(
+    bag_path: Path,
+    rgb_output_dir: Path,
+    rgbd_output_dir: Path,
+    target_count: int,
+) -> None:
     class_id = bag_path.stem
 
     pipeline = rs.pipeline()
     rs_config = rs.config()
     rs_config.enable_device_from_file(str(bag_path), repeat_playback=False)
+
     rs_config.enable_stream(rs.stream.color)
+    rs_config.enable_stream(rs.stream.depth)
 
-    pipeline.start(rs_config)
+    profile = pipeline.start(rs_config)
 
-    playback = pipeline.get_active_profile().get_device().as_playback()
+    playback = profile.get_device().as_playback()
     playback.set_real_time(False)
 
-    frames_all: list[np.ndarray] = []
+    align_to_color = rs.align(rs.stream.color) # rgb 기준으로 align
+
+    frames_all: list[tuple[np.ndarray, np.ndarray]] = []
 
     print("\nReading bag:", bag_path)
 
@@ -39,43 +48,63 @@ def process_bag(bag_path: Path, output_dir: Path, target_count: int) -> None:
         except RuntimeError:
             break
 
-        color_frame = frames.get_color_frame()
-        if not color_frame:
+        try:
+            aligned_frames = align_to_color.process(frames)
+        except RuntimeError:
             continue
 
-        image = np.asanyarray(color_frame.get_data())
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        frames_all.append(image)
+        color_frame = aligned_frames.get_color_frame()
+        depth_frame = aligned_frames.get_depth_frame()
+
+        if not color_frame or not depth_frame:
+            continue
+
+        color_image = np.asanyarray(color_frame.get_data())
+        depth_image = np.asanyarray(depth_frame.get_data())
+
+        color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
+
+        frames_all.append((color_image.copy(), depth_image.copy()))
 
     pipeline.stop()
 
     total_frames = len(frames_all)
-    print("Total frames:", total_frames)
+    print("Total aligned RGB-D frames:", total_frames)
 
     if total_frames == 0:
-        print("No frames found.")
+        print("No RGB-D frames found.")
         return
 
     if target_count >= total_frames:
         indices = list(range(total_frames))
     else:
-        indices = list(
-            np.linspace(0, total_frames - 1, target_count, dtype=int)
-        )
+        indices = list(np.linspace(0, total_frames - 1, target_count, dtype=int))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    rgb_output_dir.mkdir(parents=True, exist_ok=True)
+    rgbd_output_dir.mkdir(parents=True, exist_ok=True)
 
     for i, frame_idx in enumerate(indices, start=1):
-        image = frames_all[frame_idx]
-        filename = f"{class_id}_{i}.png"
-        save_path = output_dir / filename
-        cv2.imwrite(str(save_path), image)
+        color_bgr, depth_aligned = frames_all[frame_idx]
 
-    print("Saved:", len(indices))
+        stem = f"{class_id}_{i}"
+
+        # RGB png 저장
+        rgb_save_path = rgb_output_dir / f"{stem}.png"
+        cv2.imwrite(str(rgb_save_path), color_bgr)
+        # RGB-D 원본 저장 (.npz)
+        rgbd_save_path = rgbd_output_dir / f"{stem}.npz"
+        np.savez_compressed(
+            rgbd_save_path,
+            color=color_bgr,
+            depth=depth_aligned,
+        )
+
+    print("Saved RGB:", len(indices), "->", rgb_output_dir)
+    print("Saved RGB-D:", len(indices), "->", rgbd_output_dir)
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Extract frames from RealSense .bag files")
+    parser = argparse.ArgumentParser(description="Extract RGB and RGB-D frames from RealSense .bag files")
     parser.add_argument("--start", type=int, required=True, help="bag index start (inclusive)")
     parser.add_argument("--end", type=int, required=True, help="bag index end (inclusive)")
     parser.add_argument(
@@ -91,22 +120,35 @@ def main(argv: list[str] | None = None) -> None:
         help=f"override cfg.BAG_DIR (default: {cfg.BAG_DIR})",
     )
     parser.add_argument(
-        "--out",
+        "--rgb-out",
         type=Path,
         default=None,
-        help=f"output directory (default: {cfg.IMAGES_RAW_DIR})",
+        help=f"RGB output directory (default: {cfg.INPUT_IMAGES_DIR})",
+    )
+    parser.add_argument(
+        "--rgbd-out",
+        type=Path,
+        default=None,
+        help=f"RGB-D output directory (default: {cfg.INPUT_RGBD_DIR})",
     )
     args = parser.parse_args(argv)
 
     bag_dir = args.bag_dir or cfg.BAG_DIR
-    out_dir = args.out or cfg.IMAGES_RAW_DIR
+    rgb_out_dir = args.rgb_out or cfg.INPUT_IMAGES_DIR
+    rgbd_out_dir = args.rgbd_out or cfg.INPUT_RGBD_DIR
 
     for i in range(args.start, args.end + 1):
         bag_path = bag_dir / f"{i}.bag"
         if not bag_path.exists():
             print("Skip (not found):", bag_path)
             continue
-        process_bag(bag_path, out_dir, args.count)
+
+        process_bag(
+            bag_path=bag_path,
+            rgb_output_dir=rgb_out_dir,
+            rgbd_output_dir=rgbd_out_dir,
+            target_count=args.count,
+        )
 
 
 if __name__ == "__main__":
