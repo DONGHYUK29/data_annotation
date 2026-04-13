@@ -29,10 +29,6 @@ app = FastAPI(title="Annotation Web GUI + SAM Point Assist")
 MASK_ALPHA = 110
 MASK_RGBA = (0, 255, 0, MASK_ALPHA)
 
-
-# ======================
-# Safe I/O for Unicode Paths
-# ======================
 def read_img_safe(path: str | Path, flags=cv2.IMREAD_COLOR):
     try:
         with open(str(path), "rb") as f:
@@ -59,10 +55,6 @@ def write_img_safe(path: str | Path, img, params=None):
     except Exception:
         return False
 
-
-# ======================
-# Utils
-# ======================
 def ensure_output_dirs() -> None:
     for p in (AFTER_IMAGE_DIR, AFTER_MASK_DIR, AFTER_LABEL_DIR):
         p.mkdir(parents=True, exist_ok=True)
@@ -196,9 +188,6 @@ def move_remaining_files():
     return moved
 
 
-# ======================
-# API
-# ======================
 @app.get("/api/images")
 def api_images():
     files = list_input_images()
@@ -402,9 +391,7 @@ def api_move_remaining():
     return {"ok": True, "moved": moved}
 
 
-# ======================
 # Web UI
-# ======================
 HTML_PAGE = r"""
 <!doctype html>
 <html lang="ko">
@@ -1141,9 +1128,30 @@ async function saveCurrent(silent = false) {
 }
 
 async function moveRemaining() {
-  const res = await fetch("/api/move_remaining", { method: "POST" });
-  const data = await res.json();
-  alert(`Copied unedited items to output_2: ${data.moved}`);
+  if (isLoading) return;
+
+  isLoading = true;
+  setStatus("Copying unedited files...");
+  
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = "Copying...";
+
+  try {
+    const res = await fetch("/api/move_remaining", { method: "POST" });
+    const data = await res.json();
+
+    setStatus(`Copied ${data.moved} items`);
+    alert(`Copied unedited items to output_2: ${data.moved}`);
+  } catch (err) {
+    console.error(err);
+    setStatus("Copy failed");
+    alert("Copy failed");
+  } finally {
+    isLoading = false;
+    btn.disabled = false;
+    btn.textContent = "Copy Unedited to Output2";
+  }
 }
 
 async function prevImage() {
