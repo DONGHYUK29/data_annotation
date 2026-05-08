@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,20 +28,31 @@ if str(ROOT) not in sys.path:
 HELP = __doc__ or ""
 
 
+
 def run_web_gui(argv: list[str]) -> None:
-    import uvicorn
+    try:
+        import uvicorn
+        import config as cfg
 
-    parser = argparse.ArgumentParser(prog="python run.py gui")
-    parser.add_argument("--host", default="0.0.0.0", help="Web GUI host")
-    parser.add_argument("--port", type=int, default=7860, help="Web GUI port")
-    args = parser.parse_args(argv)
+        parser = argparse.ArgumentParser(prog="python run.py gui")
+        parser.add_argument("--host", default=cfg.WEB_HOST, help="Web GUI host")
+        parser.add_argument("--port", type=int, default=cfg.WEB_PORT, help="Web GUI port")
+        args = parser.parse_args(argv)
 
-    uvicorn.run("pipeline.gui_app:app", host=args.host, port=args.port, reload=False)
+        uvicorn.run("pipeline.gui_app:app", host=args.host, port=args.port, reload=False)
+    except ModuleNotFoundError:
+        cmd = ["docker", "compose", "up", "annotation"]
+        print("로컬 의존성이 없어 Docker로 GUI를 실행합니다:", " ".join(cmd))
+        subprocess.run(cmd, cwd=str(ROOT), check=False)
 
 
 def main() -> None:
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
-        print(HELP.strip())
+    if len(sys.argv) < 2:
+        run_web_gui([])
+        return
+
+    if sys.argv[1] in ("-h", "--help", "help"):
+        print(HELP.strip() + "\n\n(인자 없이 실행하면 GUI가 바로 시작됩니다.)")
         return
 
     cmd = sys.argv[1]
