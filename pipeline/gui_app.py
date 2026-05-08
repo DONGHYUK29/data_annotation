@@ -8,22 +8,28 @@ import sys
 import threading
 import uuid
 import mimetypes
-import time
 from pathlib import Path
-from contextlib import asynccontextmanager
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from PIL import Image
+import time 
+from contextlib import asynccontextmanager
 
 import config as cfg
 from .sam_backend import predict_sam_mask
 
 cfg.ensure_stage_dirs()
 
+IMAGE_DIR = cfg.IMAGES_RAW_DIR
+MASK_DIR = cfg.STAGE1_MASKS
+LABEL_DIR = cfg.STAGE1_LABELS
 
+AFTER_IMAGE_DIR = cfg.STAGE2_IMAGES
+AFTER_MASK_DIR = cfg.STAGE2_MASKS
+AFTER_LABEL_DIR = cfg.STAGE2_LABELS
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,15 +42,6 @@ async def lifespan(app: FastAPI):
         
     threading.Thread(target=print_notice, daemon=True).start()
     yield
-
-
-IMAGE_DIR = cfg.IMAGES_RAW_DIR
-MASK_DIR = cfg.STAGE1_MASKS
-LABEL_DIR = cfg.STAGE1_LABELS
-
-AFTER_IMAGE_DIR = cfg.STAGE2_IMAGES
-AFTER_MASK_DIR = cfg.STAGE2_MASKS
-AFTER_LABEL_DIR = cfg.STAGE2_LABELS
 
 app = FastAPI(title="Annotation Web GUI + SAM Point Assist", lifespan=lifespan)
 
@@ -524,8 +521,15 @@ def api_explore(path: str = ""):
     except Exception:
         pass
     
-    dirs.sort(key=lambda x: x["name"].lower())
-    files.sort(key=lambda x: x["name"].lower())
+    # 정렬용 헬퍼 함수
+    def natural_sort_key(item):
+        return [
+            int(text) if text.isdigit() else text.lower()
+            for text in re.split(r"(\d+)", item["name"])
+        ]
+    
+    dirs.sort(key=natural_sort_key)
+    files.sort(key=natural_sort_key)
 
     return {"dirs": dirs, "files": files}
 
@@ -580,6 +584,7 @@ def api_pipeline_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
 
 # Web UI
 HTML_PAGE = r"""
