@@ -28,8 +28,12 @@ def main(argv: list[str] | None = None) -> None:
             w / "dataset/images",
             w / "dataset/labels",
             w / "dataset/masks",
+            w / "dataset/rgbd",
         ],
-        "input": [w / "input"],
+        "input": [
+            w / "input/images",
+            w / "input/rgbd",
+            ],
         "stage1": [
             w / "output_1/labels",
             w / "output_1/masks",
@@ -41,10 +45,9 @@ def main(argv: list[str] | None = None) -> None:
             w / "output_2/masks",
         ],
         "training": [
-            w / "training/images/train",
-            w / "training/images/val",
-            w / "training/labels/train",
-            w / "training/labels/val",
+            w / "training/images",
+            w / "training/labels",
+            w / "training/dataset",
         ],
     }
     all_targets: list[Path] = []

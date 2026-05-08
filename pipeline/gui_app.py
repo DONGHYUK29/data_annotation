@@ -48,7 +48,7 @@ app = FastAPI(title="Annotation Web GUI + SAM Point Assist", lifespan=lifespan)
 MASK_ALPHA = 110
 MASK_RGBA = (0, 255, 0, MASK_ALPHA)
 
-PIPELINE_STEPS = ("extract", "segment", "gui", "export")
+PIPELINE_STEPS = ("extract", "segment", "gui", "export", "build", "train", "clean", "fix-names")
 
 PIPELINE_DIRS = {
     "extract_rgbd": cfg.INPUT_RGBD_DIR,
@@ -144,6 +144,25 @@ def _build_docker_command(step: str, payload: dict) -> list[str]:
     elif step == "export":
         cmd.extend(["--bg", str(payload.get("bg_prefix", "Environment"))])
         cmd.extend(["--mode", str(payload.get("export_mode", "copy"))])
+    elif step == "build":
+        cmd.extend(["--num-classes", str(int(payload.get("num_classes", 10)))])
+        cmd.extend(["--val-ratio", str(float(payload.get("val_ratio", 0.2)))])
+        cmd.extend(["--mode", str(payload.get("build_mode", "copy"))])
+    elif step == "train":
+        if payload.get("weights"):
+            cmd.extend(["--weights", str(payload["weights"])])
+        if payload.get("model_name"):
+            cmd.extend(["--name", str(payload["model_name"])])
+        if payload.get("epochs"):
+            cmd.extend(["--epochs", str(int(payload["epochs"]))])
+        if payload.get("batch"):
+            cmd.extend(["--batch", str(int(payload["batch"]))])
+    elif step == "clean":
+        cmd.extend(["--mode", str(payload.get("clean_mode", "all"))])
+    elif step == "fix-names":
+        if payload.get("dir"):
+            cmd.extend(["--dir", str(payload["dir"])])
+            
     return cmd
 
 
@@ -469,15 +488,9 @@ async def api_save(stem: str, request: Request):
             poly_norm.append(f"{xn:.6f}")
             poly_norm.append(f"{yn:.6f}")
 
-        x1, y1, x2, y2 = bbox
-        xc = ((x1 + x2) / 2.0) / w
-        yc = ((y1 + y2) / 2.0) / h
-        bw = (x2 - x1) / w
-        bh = (y2 - y1) / h
-
-        bbox_norm = [f"{xc:.6f}", f"{yc:.6f}", f"{bw:.6f}", f"{bh:.6f}"]
-
-        line = str(class_id) + " " + " ".join(bbox_norm + poly_norm)
+        # 기존에는 BBox(xc, yc, w, h)를 저장했으나, 
+        # YOLO Segmentation 모델 호환성을 위해 BBox 제외하고 폴리곤 좌표만 기록합니다.
+        line = str(class_id) + " " + " ".join(poly_norm)
 
         label_save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(label_save_path, "w", encoding="utf-8") as f:
@@ -503,6 +516,22 @@ def api_pipeline_config():
         },
     }
 
+@app.get("/api/weights")
+def api_weights():
+    weights = []
+    search_paths = [cfg.PROJECT_ROOT, cfg.PROJECT_ROOT / "training", cfg.PROJECT_ROOT / "weights", cfg.PROJECT_ROOT / "runs"]
+    for p in search_paths:
+        if p.exists() and p.is_dir():
+            for f in p.rglob("*.pt"):
+                try:
+                    weights.append(str(f.relative_to(cfg.PROJECT_ROOT)))
+                except ValueError:
+                    weights.append(str(f))
+    
+    if not weights:
+        weights = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
+    return {"weights": list(set(weights))}
+
 @app.get("/api/explore")
 def api_explore(path: str = ""):
     target = Path(path)
@@ -521,7 +550,6 @@ def api_explore(path: str = ""):
     except Exception:
         pass
     
-    # 정렬용 헬퍼 함수
     def natural_sort_key(item):
         return [
             int(text) if text.isdigit() else text.lower()
@@ -634,7 +662,6 @@ HTML_PAGE = r"""
       flex-direction: column;
     }
 
-    /* Right Sidebar Tabs */
     .right-tabs {
       display: flex;
       flex-direction: row;
@@ -661,7 +688,6 @@ HTML_PAGE = r"""
       color: #1c5b9e;
     }
 
-    /* Right Sidebar Settings Block */
     .settings-block {
       border: 1px solid #e6eaf0;
       border-radius: 8px;
@@ -675,7 +701,6 @@ HTML_PAGE = r"""
       font-size: 15px;
     }
 
-    /* Center containers */
     .gui-container {
       display: grid;
       grid-template-rows: 1fr auto;
@@ -699,7 +724,6 @@ HTML_PAGE = r"""
       padding: 16px 24px;
     }
 
-    /* 부모 컨테이너 (Flex 유지) */
     .preview-content {
       flex: 1;
       display: flex;
@@ -714,7 +738,6 @@ HTML_PAGE = r"""
       box-shadow: inset 0 0 10px rgba(0,0,0,0.05);
     }
 
-    /* 이미지 미리보기 */
     .preview-content img {
       width: 100%;
       height: 100%;
@@ -723,7 +746,6 @@ HTML_PAGE = r"""
       box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     }
 
-    /* 텍스트 파일 미리보기 */
     .preview-content pre {
       width: 100%;
       height: 100%;
@@ -753,6 +775,16 @@ HTML_PAGE = r"""
       border: 1px solid #d9dee5;
       border-radius: 4px;
     }
+    
+    .field-row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .field-row .field {
+      margin-bottom: 0;
+      flex: 1;
+    }
 
     .run-btn {
       width: 100%;
@@ -768,9 +800,10 @@ HTML_PAGE = r"""
     .run-btn:hover { background: #357abd; }
 
     #pipelineLog {
-      flex: 1;
       width: 100%;
-      min-height: 180px;
+      /* Log 창 길이 2.5배 적용 */
+      min-height: 450px;
+      max-height: 625px;
       font-family: Consolas, monospace;
       font-size: 12px;
       white-space: pre-wrap;
@@ -870,7 +903,6 @@ HTML_PAGE = r"""
       font-weight: bold;
     }
 
-    /* Left Sidebar Folder Views */
     .left-folder-item {
       background: #fff;
       border: 1px solid #e3e8ef;
@@ -1085,9 +1117,98 @@ HTML_PAGE = r"""
       </div>
       
     </div>
-    
+
+    <!-- 로그 창 위치 변경: Pipeline Controls 밑으로 이동 -->
     <h4 style="margin-top: 24px; margin-bottom: 8px;">Log</h4>
     <div id="pipelineLog">Waiting...</div>
+    
+    <div class="extra-tools" style="margin-top: 24px; border-top: 1px solid #d9dee5; padding-top: 16px;">
+      <h3 style="margin-top: 0; color: #1c5b9e;">🛠️ 추가 유틸리티</h3>
+      
+      <div class="right-tabs">
+        <button onclick="switchExtraTab('build')" id="extraBtn_build">Train/Val</button>
+        <button onclick="switchExtraTab('clean')" id="extraBtn_clean">Clean</button>
+        <button onclick="switchExtraTab('fixnames')" id="extraBtn_fixnames">Fix Names</button>
+      </div>
+
+      <div id="extraSettingsArea">
+        <!-- 1. Build & Train -->
+        <div id="buildSettings" class="settings-block" style="display: none;">
+          <h4>Train / Val 분할 및 학습</h4>
+          
+          <div class="field-row">
+              <div class="field">
+                <label>클래스 개수 (num-classes)</label>
+                <input id="buildNumClasses" type="number" value="10" />
+              </div>
+              <div class="field">
+                <label>Validation 비율 (val-ratio)</label>
+                <input id="buildValRatio" type="number" step="0.1" value="0.2" />
+              </div>
+          </div>
+          <div class="field">
+            <label>분할 모드 (mode)</label>
+            <select id="buildMode">
+              <option value="copy">copy</option>
+              <option value="move">move</option>
+            </select>
+          </div>
+          
+          <div style="border-top:1px solid #eee; margin:12px 0;"></div>
+          
+          <div class="field">
+            <label>추가 학습 모델 (Weights 선택)</label>
+            <input id="trainWeights" list="weightsList" placeholder="예: yolov8n.pt" />
+            <datalist id="weightsList"></datalist>
+          </div>
+          <div class="field">
+            <label>저장될 모델 이름 (Name)</label>
+            <input id="trainName" type="text" placeholder="예: custom_model" />
+          </div>
+          
+          <div class="field-row">
+              <div class="field">
+                <label>에폭 (Epochs)</label>
+                <input id="trainEpochs" type="number" value="100" />
+              </div>
+              <div class="field">
+                <label>배치 크기 (Batch)</label>
+                <input id="trainBatch" type="number" value="16" />
+              </div>
+          </div>
+
+          <button class="run-btn" style="background:#2ecc71;" onclick="runBuildAndTrain()">▶ 분할 및 추가학습 실행</button>
+        </div>
+
+        <!-- 2. Clean -->
+        <div id="cleanSettings" class="settings-block" style="display: none;">
+          <h4>작업 폴더 정리 (Clean)</h4>
+          <div class="field">
+            <label>삭제 대상</label>
+            <select id="cleanMode">
+              <option value="all">all</option>
+              <option value="dataset">dataset</option>
+              <option value="input">input</option>
+              <option value="stage1">stage1</option>
+              <option value="stage2">stage2</option>
+              <option value="training">training</option>
+            </select>
+          </div>
+          <button class="run-btn" style="background:#e74c3c;" onclick="runClean()">🗑️ 선택 폴더 초기화</button>
+        </div>
+
+        <!-- 3. Fix Names -->
+        <div id="fixnamesSettings" class="settings-block" style="display: none;">
+          <h4>파일명 정리 (Fix Names)</h4>
+          <div class="field">
+            <label>대상 폴더 (dir) - 비워두면 기본 경로 적용</label>
+            <input id="fixNamesDir" type="text" placeholder="옵션: 대상 폴더 직접 지정" />
+          </div>
+          <button class="run-btn" style="background:#f39c12;" onclick="runFixNames()">📝 입력 파일명 규칙 정리</button>
+        </div>
+      </div>
+    </div>
+
   </aside>
 </div>
 
@@ -1147,7 +1268,6 @@ const stepFolderMap = {
 function setStatus(msg) { statusEl.textContent = msg; }
 function setPipelineLog(msg) { pipelineLogEl.textContent = msg || "No logs"; }
 
-// -- Bag 파일 체크 API 호출 --
 async function checkBags() {
     try {
         const res = await fetch('/api/check_bags');
@@ -1174,7 +1294,22 @@ async function checkBags() {
     }
 }
 
-// -- 중앙 화면 미리보기 API 호출 --
+async function loadWeightsList() {
+    try {
+        const res = await fetch("/api/weights");
+        const data = await res.json();
+        const dl = document.getElementById("weightsList");
+        dl.innerHTML = "";
+        data.weights.forEach(w => {
+            const opt = document.createElement("option");
+            opt.value = w;
+            dl.appendChild(opt);
+        });
+    } catch (e) {
+        console.error("Failed to load weights", e);
+    }
+}
+
 async function previewFile(filePath, fileName) {
     const container = document.getElementById("previewContent");
     container.innerHTML = '<span class="muted">Loading preview...</span>';
@@ -1196,7 +1331,6 @@ async function previewFile(filePath, fileName) {
     }
 }
 
-// -- 파일/탐색기 트리 토글 함수 --
 async function toggleSubFolder(path, parentElem) {
     let tree = parentElem.querySelector(':scope > .folder-tree');
     if (tree) {
@@ -1241,7 +1375,6 @@ async function toggleSubFolder(path, parentElem) {
     }
 }
 
-// -- 왼쪽 사이드바 베이스 폴더 렌더링 --
 function renderLeftFolders(step) {
     const container = document.getElementById("leftFolderList");
     container.innerHTML = "";
@@ -1274,7 +1407,6 @@ function renderLeftFolders(step) {
     });
 }
 
-// Copy Unedited to Output 2 실행 함수
 async function moveRemaining(btnEvent = null) {
   if (isLoading) return;
   isLoading = true;
@@ -1304,12 +1436,9 @@ async function moveRemaining(btnEvent = null) {
   }
 }
 
-// -- 탭 스위칭 (확인창 및 Copy Unedited 기능 포함) --
 function switchPipelineTab(step) {
-    // GUI에서 다른 단계로 이동 시 알림 및 Confirm -> Copy 실행
     if (activePipelineTab === 'gui' && step !== 'gui' && step !== '') {
         const msg = "GUI 편집을 마치고 다른 단계로 넘어가기 전에,\n아직 편집하지 않은(Unedited) 마스크들을 Output 2(최종본)로 일괄 복사하시겠습니까?\n\n'확인'을 누르시면 'Copy Unedited to Output 2'가 실행됩니다.";
-        
         if (confirm(msg)) {
             moveRemaining();
         }
@@ -1318,7 +1447,6 @@ function switchPipelineTab(step) {
     activePipelineTab = step;
     const tabs = ["extract", "segment", "gui", "export"];
   
-    // 1. Right Sidebar Tab Buttons & Settings Block Toggles
     tabs.forEach(t => {
         const btn = document.getElementById("tabBtn_" + t);
         if (btn) btn.classList.toggle("active", t === step);
@@ -1329,17 +1457,14 @@ function switchPipelineTab(step) {
         }
     });
 
-    // 2. Center Container Toggles
     document.getElementById("homeContainer").style.display = (step === "") ? "block" : "none";
     document.getElementById("guiContainer").style.display = (step === "gui") ? "grid" : "none";
     document.getElementById("previewContainer").style.display = (step !== "" && step !== "gui") ? "flex" : "none";
 
-    // 3. Left Sidebar Toggles
     document.getElementById("homeSidebarContent").style.display = (step === "") ? "block" : "none";
     document.getElementById("guiSidebarContent").style.display = (step === "gui") ? "block" : "none";
     document.getElementById("folderSidebarContent").style.display = (step !== "" && step !== "gui") ? "block" : "none";
 
-    // 4. Data Reload based on Context
     if (step === "") {
         checkBags();
     } else if (step === "gui") {
@@ -1352,20 +1477,37 @@ function switchPipelineTab(step) {
     }
 }
 
+function switchExtraTab(tab) {
+    const extraTabs = ["build", "clean", "fixnames"];
+    extraTabs.forEach(t => {
+        const btn = document.getElementById("extraBtn_" + t);
+        if (btn) btn.classList.toggle("active", t === tab);
+        
+        const settingsBlock = document.getElementById(t + "Settings");
+        if (settingsBlock) {
+            settingsBlock.style.display = (t === tab) ? "block" : "none";
+        }
+    });
+}
+
 async function pollJob(jobId) {
   while (true) {
     const res = await fetch(`/api/pipeline/job/${encodeURIComponent(jobId)}`);
     const data = await res.json();
     if (!res.ok) {
       setPipelineLog(data.detail || "Job poll failed");
-      return;
+      return false;
     }
     const command = Array.isArray(data.command) ? data.command.join(" ") : "";
     const output = data.output || "";
     setPipelineLog(`[${data.status}] ${command}\n\n${output}`);
-    if (data.status === "done" || data.status === "failed") {
+    
+    if (data.status === "done") {
       setStatus(`Pipeline ${data.step}: ${data.status}`);
-      return;
+      return true;
+    } else if (data.status === "failed") {
+      setStatus(`Pipeline ${data.step}: ${data.status}`);
+      return false;
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
@@ -1400,13 +1542,100 @@ async function runPipelineStep(step) {
   }
 }
 
+async function runBuildAndTrain() {
+    setStatus("Starting dataset build (Train/Val split)...");
+    const buildPayload = {
+        step: "build",
+        num_classes: parseInt(document.getElementById("buildNumClasses").value || "10"),
+        val_ratio: parseFloat(document.getElementById("buildValRatio").value || "0.2"),
+        build_mode: document.getElementById("buildMode").value || "copy"
+    };
+
+    try {
+        const buildRes = await fetch("/api/pipeline/run", {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(buildPayload)
+        });
+        const buildData = await buildRes.json();
+        if (!buildRes.ok) throw new Error(buildData.detail);
+        const buildSuccess = await pollJob(buildData.job_id);
+
+        if (!buildSuccess) {
+            throw new Error("Build step failed. Training aborted.");
+        }
+
+        setStatus("Starting training...");
+        const trainPayload = {
+            step: "train",
+            weights: document.getElementById("trainWeights").value || "yolov8n.pt",
+            model_name: document.getElementById("trainName").value || "custom_model",
+            epochs: parseInt(document.getElementById("trainEpochs").value || "100"),
+            batch: parseInt(document.getElementById("trainBatch").value || "16")
+        };
+        const trainRes = await fetch("/api/pipeline/run", {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(trainPayload)
+        });
+        const trainData = await trainRes.json();
+        if (!trainRes.ok) throw new Error(trainData.detail);
+        await pollJob(trainData.job_id);
+
+        setStatus("Build and Train pipeline completed.");
+        alert("Train/Val 분할 및 학습이 완료되었습니다.");
+    } catch(e) {
+        setStatus("Build/Train failed");
+        alert(e);
+    }
+}
+
+async function runClean() {
+    if(!confirm("정말로 작업 폴더를 정리하시겠습니까?\n이 작업은 되돌릴 수 없습니다.")) return;
+    
+    setStatus("Cleaning workspace...");
+    const payload = {
+        step: "clean",
+        clean_mode: document.getElementById("cleanMode").value
+    };
+    
+    try {
+        const res = await fetch("/api/pipeline/run", {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail);
+        await pollJob(data.job_id);
+        setStatus("Workspace clean completed.");
+    } catch(e) {
+        setStatus("Clean failed");
+        alert(e);
+    }
+}
+
+async function runFixNames() {
+    setStatus("Fixing filenames...");
+    const payload = {
+        step: "fix-names",
+        dir: document.getElementById("fixNamesDir").value.trim()
+    };
+    
+    try {
+        const res = await fetch("/api/pipeline/run", {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail);
+        await pollJob(data.job_id);
+        setStatus("Fix names completed.");
+    } catch(e) {
+        setStatus("Fix names failed");
+        alert(e);
+    }
+}
+
 async function loadPipelineConfig() {
   const res = await fetch("/api/pipeline/config");
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || "Failed to load pipeline config");
   pipelineConfig = data;
   
-  // Set default values in DOM (서버로부터 받은 defaults 사용)
   document.getElementById("extractStart").value = data.defaults.extract_start;
   document.getElementById("extractEnd").value = data.defaults.extract_end;
   document.getElementById("extractCount").value = data.defaults.extract_count;
@@ -1863,6 +2092,9 @@ window.addEventListener("resize", () => {
 async function initApp() {
   try {
     await loadPipelineConfig();
+    await loadWeightsList(); // 가중치 모델 목록 로드
+    // 최초 실행시 기본 탭 열기 설정 (extra tab 중 첫번째)
+    switchExtraTab('build'); 
   } catch (err) {
     setPipelineLog(String(err));
   }
