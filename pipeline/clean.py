@@ -28,11 +28,9 @@ def main(argv: list[str] | None = None) -> None:
             w / "dataset/images",
             w / "dataset/labels",
             w / "dataset/masks",
-            w / "dataset/rgbd",
         ],
         "input": [
             w / "input/images",
-            w / "input/rgbd",
             ],
         "stage1": [
             w / "output_1/labels",

@@ -1,5 +1,6 @@
 services:
   annotation:
+    shm_size: "8gb"
     build:
       context: .
       dockerfile: Dockerfile

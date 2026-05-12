@@ -54,16 +54,11 @@ WEIGHTS_DIR = _path_from_env(
 WEB_HOST = _str_from_env("ANNOTATION_WEB_HOST", "0.0.0.0")
 WEB_PORT = _int_from_env("ANNOTATION_WEB_PORT", 7860)
 
-# --- ROS bag → 프레임 이미지 ---
-BAG_DIR = PROJECT_ROOT / "bag"
-
-# 입력 루트
+# 입력 루트 (PNG 등은 create/input/images 에 직접 배치)
 INPUT_DIR = WORKSPACE_ROOT / "input"
 
 # RGB 이미지 저장 폴더
 INPUT_IMAGES_DIR = INPUT_DIR / "images"
-# RGB-D 원본 저장 폴더 (.npz)
-INPUT_RGBD_DIR = INPUT_DIR / "rgbd"
 
 # 하위 호환용 별칭 (기존 코드 깨짐 방지)
 IMAGES_RAW_DIR = INPUT_IMAGES_DIR
@@ -85,10 +80,11 @@ DATASET_DIR = WORKSPACE_ROOT / "dataset"
 DATASET_IMAGES = DATASET_DIR / "images"
 DATASET_MASKS = DATASET_DIR / "masks"
 DATASET_LABELS = DATASET_DIR / "labels"
-DATASET_RGBD = DATASET_DIR / "rgbd"
 
 # build_train_split 결과 (Ultralytics YOLO 학습용)
 TRAINING_DIR = WORKSPACE_ROOT / "training"
+# build_split 이 생성하는 yaml (path 항목이 TRAINING_DIR 를 가리킴)
+TRAINING_DATASET_YAML = TRAINING_DIR / "dataset.yaml"
 
 # --- 모델 가중치 ---
 YOLO_WEIGHT = WEIGHTS_DIR / "yolo26l-seg_finetuned_mix_2000.pt"
@@ -115,7 +111,6 @@ def ensure_stage_dirs() -> None:
     """필요한 출력 폴더 생성."""
     for p in (
         INPUT_IMAGES_DIR,
-        INPUT_RGBD_DIR,
         STAGE1_MASKS,
         STAGE1_LABELS,
         STAGE1_OVERLAYS,
@@ -125,7 +120,6 @@ def ensure_stage_dirs() -> None:
         DATASET_IMAGES,
         DATASET_MASKS,
         DATASET_LABELS,
-        DATASET_RGBD,
         TRAINING_DIR,
     ):
         p.mkdir(parents=True, exist_ok=True)

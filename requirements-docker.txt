@@ -26,7 +26,6 @@ polars==1.36.1
 polars-runtime-32==1.36.1
 psutil==7.2.2
 pyparsing==3.3.1
-pyrealsense2==2.56.5.9235
 python-dateutil==2.9.0.post0
 pytz==2025.2
 PyYAML==6.0.3
@@ -47,3 +46,4 @@ urllib3==2.6.3
 wcwidth==0.6.0
 fastapi
 uvicorn[standard]
+python-multipart

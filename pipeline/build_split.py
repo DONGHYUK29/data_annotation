@@ -1,4 +1,4 @@
-"""dataset/ → training/ train·val 분할 + dataset.yaml."""
+"""dataset/ → training/ train·val 분할 + dataset.yaml (항상 복사, 라벨에서 bbox 접두 제거)."""
 from __future__ import annotations
 
 import argparse
@@ -13,15 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config as cfg
+from pipeline.label_utils import normalize_label_text
 
 random.seed(42)
-
-
-def transfer(src: Path, dst: Path, mode: str) -> None:
-    if mode == "copy":
-        shutil.copy2(src, dst)
-    else:
-        shutil.move(src, dst)
 
 
 def list_images(src_dir: Path) -> list[Path]:
@@ -38,9 +32,15 @@ def parse_group(stem: str):
     return (background, class_id)
 
 
+def write_label_normalized(src_label: Path, dst_label: Path) -> None:
+    """YOLO-seg 학습용: bbox(xc,yc,w,h) 접두가 있으면 제거한 뒤 저장."""
+    text = src_label.read_text(encoding="utf-8")
+    dst_label.parent.mkdir(parents=True, exist_ok=True)
+    dst_label.write_text(normalize_label_text(text), encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Train/val split from dataset/")
-    parser.add_argument("--mode", default="copy", choices=["copy", "move"])
+    parser = argparse.ArgumentParser(description="Train/val split from dataset/ (copy only)")
     parser.add_argument(
         "--val-ratio",
         type=float,
@@ -71,9 +71,6 @@ def main(argv: list[str] | None = None) -> None:
 
     img_files = list_images(src_image)
     print("Total images:", len(img_files))
-    if not img_files:
-        print("No dataset found.")
-        return
 
     samples = []
     for img_path in img_files:
@@ -93,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
 
     for _key, items in groups.items():
         random.shuffle(items)
-        val_count = max(1, int(len(items) * val_ratio))
+        val_count = max(1, int(len(items) * val_ratio)) if items else 0
         val_set.extend(items[:val_count])
         train_set.extend(items[val_count:])
 
@@ -101,12 +98,12 @@ def main(argv: list[str] | None = None) -> None:
     print("Val samples:", len(val_set))
 
     for img_path, label_path in train_set:
-        transfer(img_path, img_train / img_path.name, args.mode)
-        transfer(label_path, lab_train / label_path.name, args.mode)
+        shutil.copy2(img_path, img_train / img_path.name)
+        write_label_normalized(label_path, lab_train / label_path.name)
 
     for img_path, label_path in val_set:
-        transfer(img_path, img_val / img_path.name, args.mode)
-        transfer(label_path, lab_val / label_path.name, args.mode)
+        shutil.copy2(img_path, img_val / img_path.name)
+        write_label_normalized(label_path, lab_val / label_path.name)
 
     yaml_path = train_root / "dataset.yaml"
     names = [f"class_{i}" for i in range(args.num_classes)]

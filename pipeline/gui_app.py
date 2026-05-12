@@ -12,7 +12,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from PIL import Image
 import time 
@@ -48,17 +48,13 @@ app = FastAPI(title="Annotation Web GUI + SAM Point Assist", lifespan=lifespan)
 MASK_ALPHA = 110
 MASK_RGBA = (0, 255, 0, MASK_ALPHA)
 
-PIPELINE_STEPS = ("extract", "segment", "gui", "export", "build", "train", "clean", "fix-names")
+PIPELINE_STEPS = ("input", "segment", "gui", "export", "train", "clean", "fix-names")
 
 PIPELINE_DIRS = {
-    "extract_rgbd": cfg.INPUT_RGBD_DIR,
-    "extract_images": cfg.INPUT_IMAGES_DIR,
-    
+    "input_images": cfg.INPUT_IMAGES_DIR,
     "segment_images": cfg.STAGE1_DIR / "images",
     "segment_labels": cfg.STAGE1_LABELS,
     "segment_masks": cfg.STAGE1_MASKS,
-    
-    "export_rgbd": cfg.DATASET_DIR / "rgbd",
     "export_images": cfg.DATASET_DIR / "images",
     "export_labels": cfg.DATASET_DIR / "labels",
     "export_masks": cfg.DATASET_DIR / "masks",
@@ -103,20 +99,42 @@ def ensure_output_dirs() -> None:
 def _run_job(job_id: str, cmd: list[str]) -> None:
     with JOBS_LOCK:
         JOBS[job_id]["status"] = "running"
+        JOBS[job_id]["output"] = ""
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             " ".join(cmd),
             cwd=str(cfg.PROJECT_ROOT),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            check=False,
             shell=True,
+            bufsize=1,
         )
-        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+
+        full_output = []
+
+        while True:
+            line = proc.stdout.readline()
+
+            if not line and proc.poll() is not None:
+                break
+
+            if line:
+                full_output.append(line)
+
+                with JOBS_LOCK:
+                    JOBS[job_id]["output"] = "".join(full_output)
+
+        return_code = proc.wait()
+
         with JOBS_LOCK:
-            JOBS[job_id]["status"] = "done" if proc.returncode == 0 else "failed"
-            JOBS[job_id]["returncode"] = proc.returncode
-            JOBS[job_id]["output"] = output.strip()
+            JOBS[job_id]["status"] = (
+                "done" if return_code == 0 else "failed"
+            )
+            JOBS[job_id]["returncode"] = return_code
+            JOBS[job_id]["output"] = "".join(full_output)
+
     except Exception as exc:
         with JOBS_LOCK:
             JOBS[job_id]["status"] = "failed"
@@ -130,11 +148,7 @@ def _build_docker_command(step: str, payload: dict) -> list[str]:
         base.append("--service-ports")
     cmd = ["python", "run.py", step]
 
-    if step == "extract":
-        cmd.extend(["--start", str(int(payload.get("start", 0)))])
-        cmd.extend(["--end", str(int(payload.get("end", 9)))])
-        cmd.extend(["--count", str(int(payload.get("count", 100)))])
-    elif step == "segment":
+    if step == "segment":
         if payload.get("input_dir"):
             cmd.extend(["--input", str(payload["input_dir"])])
         if payload.get("output_dir"):
@@ -142,21 +156,61 @@ def _build_docker_command(step: str, payload: dict) -> list[str]:
     elif step == "gui":
         cmd.extend(["--host", "0.0.0.0", "--port", str(cfg.WEB_PORT)])
     elif step == "export":
-        cmd.extend(["--bg", str(payload.get("bg_prefix", "Environment"))])
-        cmd.extend(["--mode", str(payload.get("export_mode", "copy"))])
-    elif step == "build":
-        cmd.extend(["--num-classes", str(int(payload.get("num_classes", 10)))])
-        cmd.extend(["--val-ratio", str(float(payload.get("val_ratio", 0.2)))])
-        cmd.extend(["--mode", str(payload.get("build_mode", "copy"))])
+        cmd.extend(["--bg", str(payload.get("bg_prefix", ""))])
     elif step == "train":
-        if payload.get("weights"):
-            cmd.extend(["--weights", str(payload["weights"])])
-        if payload.get("model_name"):
-            cmd.extend(["--name", str(payload["model_name"])])
-        if payload.get("epochs"):
-            cmd.extend(["--epochs", str(int(payload["epochs"]))])
-        if payload.get("batch"):
-            cmd.extend(["--batch", str(int(payload["batch"]))])
+        cmd.extend(["--weights", str(payload["weights"])])
+        cmd.extend(["--name", str(payload.get("model_name", "exp"))])
+        cmd.extend(["--epochs", str(int(payload.get("epochs", 100)))])
+        cmd.extend(["--batch", str(int(payload.get("batch", 16)))])
+        cmd.extend(["--imgsz", str(int(payload.get("imgsz", 640)))])
+        cmd.extend(["--num-classes", str(int(payload.get("num_classes", 1)))])
+        cmd.extend(["--val-ratio", str(float(payload.get("val_ratio", 0.2)))])
+        cmd.extend(
+            [
+                "--data",
+                str(payload.get("data") or (cfg.TRAINING_DIR / "dataset.yaml")),
+            ]
+        )
+        cmd.extend(["--project", str(payload.get("project") or cfg.WEIGHTS_DIR)])
+        if payload.get("lr0") not in (None, ""):
+            cmd.extend(["--lr0", str(float(payload["lr0"]))])
+        if payload.get("patience") not in (None, ""):
+            cmd.extend(["--patience", str(int(payload["patience"]))])
+        if payload.get("optimizer"):
+            cmd.extend(["--optimizer", str(payload["optimizer"])])
+        if payload.get("freeze") not in (None, ""):
+            cmd.extend(["--freeze", str(int(payload["freeze"]))])
+        if payload.get("augment"):
+            cmd.extend(["--augment", str(payload["augment"])])
+        if payload.get("workers") not in (None, ""):
+            cmd.extend(["--workers", str(int(payload["workers"]))])
+        if payload.get("seed") not in (None, ""):
+            cmd.extend(["--seed", str(int(payload["seed"]))])
+        if payload.get("resume") not in (None, "", False):
+            r = payload["resume"]
+            if r is True:
+                cmd.append("--resume")
+                cmd.append("true")
+            else:
+                cmd.extend(["--resume", str(r)])
+        if payload.get("cache"):
+            cmd.extend(["--cache", str(payload["cache"])])
+        if payload.get("amp") is True:
+            cmd.extend(["--amp", "true"])
+        elif payload.get("amp") is False:
+            cmd.extend(["--amp", "false"])
+        if payload.get("cos_lr") is True:
+            cmd.extend(["--cos-lr", "true"])
+        elif payload.get("cos_lr") is False:
+            cmd.extend(["--cos-lr", "false"])
+        if payload.get("weight_decay") not in (None, ""):
+            cmd.extend(["--weight-decay", str(float(payload["weight_decay"]))])
+        if payload.get("dropout") not in (None, ""):
+            cmd.extend(["--dropout", str(float(payload["dropout"]))])
+        if payload.get("save_period") not in (None, ""):
+            cmd.extend(["--save-period", str(int(payload["save_period"]))])
+        if payload.get("pretrained_backbone_only"):
+            cmd.append("--pretrained-backbone-only")
     elif step == "clean":
         cmd.extend(["--mode", str(payload.get("clean_mode", "all"))])
     elif step == "fix-names":
@@ -255,19 +309,6 @@ def png_response_from_array(arr: np.ndarray) -> Response:
     return Response(content=buf.tobytes(), media_type="image/png")
 
 
-@app.get("/api/check_bags")
-def api_check_bags():
-    bag_dir = cfg.BAG_DIR
-    if not bag_dir.exists():
-        return {"count": 0, "files": []}
-    bags = list(bag_dir.glob("*.bag"))
-    bags.sort(key=lambda x: x.name)
-    return {
-        "count": len(bags),
-        "files": [b.name for b in bags]
-    }
-
-
 def move_remaining_files():
     ensure_output_dirs()
     moved = 0
@@ -320,6 +361,40 @@ def api_images():
         "items": [p.stem for p in files],
         "count": len(files),
     }
+
+
+@app.get("/api/input/status")
+def api_input_status():
+    files = list_input_images()
+    return {
+        "dir": str(IMAGE_DIR),
+        "count": len(files),
+        "samples": [p.name for p in files[:10]],
+    }
+
+
+@app.post("/api/input/upload")
+async def api_input_upload(files: list[UploadFile] = File(...)):
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    allowed = {".png", ".jpg", ".jpeg", ".bmp"}
+    saved: list[str] = []
+    skipped: list[str] = []
+
+    for f in files:
+        name = Path(f.filename or "").name
+        ext = Path(name).suffix.lower()
+        if not name or ext not in allowed:
+            skipped.append(name or "(unnamed)")
+            continue
+        dest = IMAGE_DIR / name
+        data = await f.read()
+        try:
+            dest.write_bytes(data)
+            saved.append(name)
+        except OSError:
+            skipped.append(name)
+
+    return {"ok": True, "saved": saved, "skipped": skipped, "dir": str(IMAGE_DIR)}
 
 
 @app.get("/api/image/{stem}")
@@ -508,29 +583,25 @@ def api_pipeline_config():
         "steps": list(PIPELINE_STEPS),
         "dirs": {k: str(v) for k, v in PIPELINE_DIRS.items()},
         "defaults": {
-            "extract_start": 0,
-            "extract_end": 9,
-            "extract_count": 100,
-            "export_bg_prefix": "Environment",
-            "export_mode": "copy",
+            "export_bg_prefix": "",
+            "training_dataset_yaml": str(cfg.TRAINING_DATASET_YAML),
+            "weights_dir": str(cfg.WEIGHTS_DIR),
         },
     }
 
 @app.get("/api/weights")
 def api_weights():
-    weights = []
-    search_paths = [cfg.PROJECT_ROOT, cfg.PROJECT_ROOT / "training", cfg.PROJECT_ROOT / "weights", cfg.PROJECT_ROOT / "runs"]
-    for p in search_paths:
-        if p.exists() and p.is_dir():
-            for f in p.rglob("*.pt"):
-                try:
-                    weights.append(str(f.relative_to(cfg.PROJECT_ROOT)))
-                except ValueError:
-                    weights.append(str(f))
-    
-    if not weights:
-        weights = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"]
-    return {"weights": list(set(weights))}
+    wd = cfg.WEIGHTS_DIR
+    if not wd.is_dir():
+        return {"weights": []}
+    names = sorted(
+        {
+            p.name
+            for p in wd.iterdir()
+            if p.is_file() and p.suffix.lower() in (".pt", ".yaml", ".yml")
+        }
+    )
+    return {"weights": names}
 
 @app.get("/api/explore")
 def api_explore(path: str = ""):
@@ -588,6 +659,8 @@ async def api_pipeline_run(request: Request):
     step = str(payload.get("step", "")).strip().lower()
     if step not in PIPELINE_STEPS:
         raise HTTPException(status_code=400, detail="Invalid step")
+    if step == "train" and not str(payload.get("weights", "")).strip():
+        raise HTTPException(status_code=400, detail="weights required for train")
 
     cmd = _build_docker_command(step, payload)
     job_id = uuid.uuid4().hex
@@ -993,24 +1066,9 @@ HTML_PAGE = r"""
 <div class="app">
   <aside class="sidebar" id="leftSidebar">
     
-    <div id="homeSidebarContent" style="display: none;">
-      <h3 style="margin-top: 0;">Welcome</h3>
-      <p class="muted">우측 패널에서 파이프라인 단계를 선택하세요.</p>
-    </div>
-
     <div id="guiSidebarContent" style="display: none;">
       <h3 style="margin-top: 0;">Images</h3>
       <div class="muted" id="countInfo"></div>
-
-      <div class="hint-box">
-        <b>Copy Unedited to Output2</b><br>
-        아직 수정하지 않은 이미지들에 대해<br>
-        output_1 결과를 output_2로 그대로 복사합니다.<br>
-        즉, 편집 안 한 것도 최종본으로 넘기는 기능입니다.
-      </div>
-      <div style="margin: 10px 0;">
-        <button id="btnMoveRemaining" onclick="moveRemaining(event)" style="width:100%">Copy Unedited to Output2</button>
-      </div>
 
       <div class="hint-box" style="margin-top: 10px;">
         <b>SAM Point Assist</b><br>
@@ -1031,13 +1089,6 @@ HTML_PAGE = r"""
 
   <main class="main" id="mainArea">
     
-    <div id="homeContainer" class="center-tab-content">
-      <h2 style="margin-top:0">Pipeline Initialization</h2>
-      <div id="bagCheckResult" class="check-result-box">
-        <span class="muted">Checking bag files...</span>
-      </div>
-    </div>
-
     <div id="guiContainer" class="gui-container" style="display: none;">
       <div class="viewer-wrap" id="viewerWrap">
         <div class="canvas-stack" id="canvasStack">
@@ -1078,24 +1129,32 @@ HTML_PAGE = r"""
   </main>
 
   <aside class="pipeline-panel">
-    <h3 style="margin-top: 0;">Pipeline Controls</h3>
+    <h3 style="margin-top: 0;">Editor</h3>
     
     <div class="right-tabs">
-      <button onclick="switchPipelineTab('extract')" id="tabBtn_extract">Extract</button>
+      <button onclick="switchPipelineTab('input')" id="tabBtn_input">Input</button>
       <button onclick="switchPipelineTab('segment')" id="tabBtn_segment">Segment</button>
       <button onclick="switchPipelineTab('gui')" id="tabBtn_gui">GUI</button>
       <button onclick="switchPipelineTab('export')" id="tabBtn_export">Export</button>
     </div>
     
     <div id="rightSettingsArea">
-      
-      <div id="extractSettings" class="settings-block" style="display: none;">
-        <h4>Extract Settings</h4>
-        <div class="field"><label>Start Bag Index</label><input id="extractStart" type="number" min="0" value="0" /></div>
-        <div class="field"><label>End Bag Index</label><input id="extractEnd" type="number" min="0" value="9" /></div>
-        <div class="field"><label>Frames Per Bag</label><input id="extractCount" type="number" min="1" value="100" /></div>
-        <button class="run-btn" onclick="runPipelineStep('extract')">▶ Run Extract</button>
+      <div id="inputSettings" class="settings-block" style="display: none;">
+        <h4>Input Settings</h4>
+        <div class="muted" style="margin-bottom: 12px;">학습·세그멘테이션용 이미지를 먼저 준비하세요.</div>
+        <button class="run-btn" style="margin-top:0;background:#607d8b;" onclick="checkInputStatus()">📂 입력 경로 확인</button>
+        <div id="inputCheckResult" class="hint-box" style="margin-top:10px;">
+          <div class="muted">아직 확인하지 않았습니다.</div>
+        </div>
+        <div id="dropZone" class="hint-box" style="border:2px dashed #9db2c8; background:#f8fbff; cursor:pointer;">
+          <b>이미지 드래그 앤 드롭</b><br>
+          PNG/JPG/JPEG/BMP 파일을 여기에 놓으면 <code>create/input/images</code>로 업로드됩니다.
+          <div style="margin-top:8px;">
+            <input id="filePicker" type="file" accept=".png,.jpg,.jpeg,.bmp" multiple />
+          </div>
+        </div>
       </div>
+      
       
       <div id="segmentSettings" class="settings-block" style="display: none;">
         <h4>Segment Settings</h4>
@@ -1105,20 +1164,13 @@ HTML_PAGE = r"""
 
       <div id="exportSettings" class="settings-block" style="display: none;">
         <h4>Export Settings</h4>
-        <div class="field"><label>Export Prefix (bg)</label><input id="exportBgPrefix" type="text" value="Environment" /></div>
-        <div class="field">
-          <label>Mode</label>
-          <select id="exportMode">
-            <option value="copy">copy</option>
-            <option value="move">move</option>
-          </select>
-        </div>
+        <div class="field"><label>Export Prefix (bg)</label><input id="exportBgPrefix" type="text" value="" /></div>
         <button class="run-btn" onclick="runPipelineStep('export')">▶ Run Export</button>
       </div>
       
     </div>
 
-    <!-- 로그 창 위치 변경: Pipeline Controls 밑으로 이동 -->
+    <!-- 로그 (Editor 하단) -->
     <h4 style="margin-top: 24px; margin-bottom: 8px;">Log</h4>
     <div id="pipelineLog">Waiting...</div>
     
@@ -1126,58 +1178,119 @@ HTML_PAGE = r"""
       <h3 style="margin-top: 0; color: #1c5b9e;">🛠️ 추가 유틸리티</h3>
       
       <div class="right-tabs">
-        <button onclick="switchExtraTab('build')" id="extraBtn_build">Train/Val</button>
+        <button onclick="switchExtraTab('train')" id="extraBtn_train">Training</button>
         <button onclick="switchExtraTab('clean')" id="extraBtn_clean">Clean</button>
-        <button onclick="switchExtraTab('fixnames')" id="extraBtn_fixnames">Fix Names</button>
       </div>
 
       <div id="extraSettingsArea">
-        <!-- 1. Build & Train -->
-        <div id="buildSettings" class="settings-block" style="display: none;">
-          <h4>Train / Val 분할 및 학습</h4>
+        <!-- 1. Train (YOLO Training) -->
+        <div id="trainSettings" class="settings-block" style="display: none;">
+          <h4>YOLO 학습 (Training)</h4>
+          <p class="muted" style="margin-top:0;">학습 실행 시 내부적으로 build_split을 먼저 수행해 <code>create/training/dataset.yaml</code>을 생성한 뒤 train합니다.</p>
+          <p class="muted">스크래치는 <code>weights/yolo26l-seg.yaml</code> 등, 추가학습은 <code>weights/*.pt</code>를 선택하세요.</p>
           
+          <h5 style="margin-bottom:8px;">필수 옵션</h5>
+          <div class="field">
+            <label>기준 모델 (weights/*.pt 또는 *.yaml)</label>
+            <select id="trainWeights"></select>
+          </div>
+          <div class="field">
+            <label>모델 이름 (exp_name)</label>
+            <input id="trainName" type="text" placeholder="예: my_exp" />
+          </div>
+          <div class="field">
+            <label>클래스 개수 (num_classes)</label>
+            <input id="trainNumClasses" type="number" value="10" min="1" />
+          </div>
           <div class="field-row">
               <div class="field">
-                <label>클래스 개수 (num-classes)</label>
-                <input id="buildNumClasses" type="number" value="10" />
+                <label>Epoch</label>
+                <input id="trainEpochs" type="number" value="100" min="1" />
               </div>
               <div class="field">
-                <label>Validation 비율 (val-ratio)</label>
-                <input id="buildValRatio" type="number" step="0.1" value="0.2" />
-              </div>
-          </div>
-          <div class="field">
-            <label>분할 모드 (mode)</label>
-            <select id="buildMode">
-              <option value="copy">copy</option>
-              <option value="move">move</option>
-            </select>
-          </div>
-          
-          <div style="border-top:1px solid #eee; margin:12px 0;"></div>
-          
-          <div class="field">
-            <label>추가 학습 모델 (Weights 선택)</label>
-            <input id="trainWeights" list="weightsList" placeholder="예: yolov8n.pt" />
-            <datalist id="weightsList"></datalist>
-          </div>
-          <div class="field">
-            <label>저장될 모델 이름 (Name)</label>
-            <input id="trainName" type="text" placeholder="예: custom_model" />
-          </div>
-          
-          <div class="field-row">
-              <div class="field">
-                <label>에폭 (Epochs)</label>
-                <input id="trainEpochs" type="number" value="100" />
+                <label>Batch size</label>
+                <input id="trainBatch" type="number" value="16" min="1" />
               </div>
               <div class="field">
-                <label>배치 크기 (Batch)</label>
-                <input id="trainBatch" type="number" value="16" />
+                <label>Image size</label>
+                <input id="trainImgsz" type="number" value="640" min="32" step="32" />
+              </div>
+              <div class="field">
+                <label>Val ratio</label>
+                <input id="trainValRatio" type="number" value="0.2" min="0.01" max="0.99" step="0.01" />
               </div>
           </div>
 
-          <button class="run-btn" style="background:#2ecc71;" onclick="runBuildAndTrain()">▶ 분할 및 추가학습 실행</button>
+          <h5 style="margin-top:16px;">선택 옵션</h5>
+          <div class="field-row">
+            <div class="field"><label>Learning rate</label><input id="trainLr0" type="number" step="any" placeholder="기본" /></div>
+            <div class="field"><label>Patience</label><input id="trainPatience" type="number" placeholder="기본" /></div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Optimizer</label>
+              <select id="trainOptimizer">
+                <option value="">auto</option>
+                <option value="SGD">SGD</option>
+                <option value="AdamW">AdamW</option>
+                <option value="Adam">Adam</option>
+              </select>
+            </div>
+            <div class="field"><label>Freeze layers</label><input id="trainFreeze" type="number" min="0" placeholder="0=off" /></div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Augmentation</label>
+              <select id="trainAugment">
+                <option value="low">low</option>
+                <option value="medium" selected>medium</option>
+                <option value="high">high</option>
+              </select>
+            </div>
+            <div class="field"><label>Workers</label><input id="trainWorkers" type="number" min="0" placeholder="기본" /></div>
+            <div class="field"><label>Seed</label><input id="trainSeed" type="number" placeholder="기본" /></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Resume</label><input id="trainResumePath" type="text" placeholder="체크포인트 경로 또는 비움" /></div>
+            <div class="field">
+              <label>Cache</label>
+              <select id="trainCache">
+                <option value="">(기본)</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+                <option value="ram">ram</option>
+                <option value="disk">disk</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Mixed precision (fp16)</label>
+              <select id="trainAmp">
+                <option value="">(기본)</option>
+                <option value="true">on</option>
+                <option value="false">off</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Cosine LR</label>
+              <select id="trainCosLr">
+                <option value="">(기본)</option>
+                <option value="true">on</option>
+                <option value="false">off</option>
+              </select>
+            </div>
+            <div class="field"><label><input type="checkbox" id="trainResumeBool" /> Resume (자동 이어하기)</label></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Weight decay</label><input id="trainWd" type="number" step="any" placeholder="기본" /></div>
+            <div class="field"><label>Dropout</label><input id="trainDropout" type="number" step="any" placeholder="기본" /></div>
+            <div class="field"><label>Save period</label><input id="trainSavePeriod" type="number" placeholder="기본" /></div>
+          </div>
+          <div class="field">
+            <label><input type="checkbox" id="trainPretrainedBackboneOnly" /> Pretrained backbone only</label>
+          </div>
+          <button class="run-btn" style="background:#3498db;" onclick="runTrain()">▶ 학습 실행</button>
         </div>
 
         <!-- 2. Clean -->
@@ -1195,16 +1308,6 @@ HTML_PAGE = r"""
             </select>
           </div>
           <button class="run-btn" style="background:#e74c3c;" onclick="runClean()">🗑️ 선택 폴더 초기화</button>
-        </div>
-
-        <!-- 3. Fix Names -->
-        <div id="fixnamesSettings" class="settings-block" style="display: none;">
-          <h4>파일명 정리 (Fix Names)</h4>
-          <div class="field">
-            <label>대상 폴더 (dir) - 비워두면 기본 경로 적용</label>
-            <input id="fixNamesDir" type="text" placeholder="옵션: 대상 폴더 직접 지정" />
-          </div>
-          <button class="run-btn" style="background:#f39c12;" onclick="runFixNames()">📝 입력 파일명 규칙 정리</button>
         </div>
       </div>
     </div>
@@ -1248,17 +1351,15 @@ const cursorOverlayEl = document.getElementById("cursorOverlay");
 const pipelineLogEl = document.getElementById("pipelineLog");
 
 const stepFolderMap = {
-    extract: [
-        { label: "create/input/rgbd/", key: "extract_rgbd" },
-        { label: "create/input/images/", key: "extract_images" }
+    input: [
+        { label: "create/input/images", key: "input_images" }
     ],
     segment: [
-        { label: "create/output1/images/", key: "segment_images" },
-        { label: "create/output1/labels/", key: "segment_labels" },
-        { label: "create/output1/masks/", key: "segment_masks" }
+        { label: "create/output_1/images/", key: "segment_images" },
+        { label: "create/output_1/labels/", key: "segment_labels" },
+        { label: "create/output_1/masks/", key: "segment_masks" }
     ],
     export: [
-        { label: "create/dataset/rgbd", key: "export_rgbd" },
         { label: "create/dataset/images", key: "export_images" },
         { label: "create/dataset/labels", key: "export_labels" },
         { label: "create/dataset/masks", key: "export_masks" }
@@ -1268,29 +1369,63 @@ const stepFolderMap = {
 function setStatus(msg) { statusEl.textContent = msg; }
 function setPipelineLog(msg) { pipelineLogEl.textContent = msg || "No logs"; }
 
-async function checkBags() {
+function formatPipelineOutput(raw) {
+    const lines = String(raw || "").split("\n");
+    const kept = [];
+    let yoloProgress = null;
+
+    for (const line of lines) {
+        const m = line.match(/YOLO batches:\s*(\d+)%\|[^|]*\|\s*(\d+)\/(\d+)/);
+        if (m) {
+            yoloProgress = {
+                percent: Number(m[1]),
+                done: Number(m[2]),
+                total: Number(m[3]),
+            };
+            continue;
+        }
+        kept.push(line);
+    }
+
+    if (yoloProgress) {
+        const barLen = 20;
+        const fill = Math.max(0, Math.min(barLen, Math.round((yoloProgress.percent / 100) * barLen)));
+        const bar = "█".repeat(fill) + "░".repeat(barLen - fill);
+        kept.push(`YOLO batches progress: [${bar}] ${yoloProgress.percent}% (${yoloProgress.done}/${yoloProgress.total})`);
+    }
+    return kept.join("\n").trim();
+}
+
+async function checkInputStatus() {
     try {
-        const res = await fetch('/api/check_bags');
+        const res = await fetch("/api/input/status");
         const data = await res.json();
-        const container = document.getElementById("bagCheckResult");
-        
-        if (data.count > 0) {
-            container.innerHTML = `
-                <h3 style="color: #2e7d32; margin-top:0;">✅ ${data.count}개의 bag 파일을 찾았습니다.</h3>
-                <ul>${data.files.map(f => `<li>${f}</li>`).join('')}</ul>
-                <p style="margin-top: 16px; color: #475467;">우측의 <b>Extract</b> 탭을 눌러 파이프라인을 시작하세요.</p>
-            `;
+        const el = document.getElementById("inputCheckResult");
+        if (!res.ok) throw new Error(data.detail || "status fetch failed");
+        if ((data.count || 0) > 0) {
+            el.innerHTML = `<b>입력 확인됨</b><br>경로: <code>${data.dir}</code><br>파일 수: <b>${data.count}</b>`;
         } else {
-            container.innerHTML = `
-                <h3 style="color: #d32f2f; margin-top:0;">⚠️ bag 파일을 찾을 수 없습니다.</h3>
-                <p style="color: #475467; margin-bottom: 0;">
-                    <code>bag/</code> 경로에 <code>class_number.bag</code> 형식의 RealSense raw bag 파일을 추가해주세요.
-                </p>
-            `;
+            el.innerHTML = `<b>입력 파일이 없습니다</b><br>경로: <code>${data.dir}</code><br>아래 드래그앤드롭으로 이미지를 추가하세요.`;
         }
     } catch (e) {
-        console.error(e);
-        document.getElementById("bagCheckResult").innerHTML = '<span style="color:red;">Failed to check bag files.</span>';
+        document.getElementById("inputCheckResult").innerHTML = `<span style="color:red;">입력 경로 확인 실패: ${String(e)}</span>`;
+    }
+}
+
+async function uploadInputFiles(fileList) {
+    if (!fileList || fileList.length === 0) return;
+    const fd = new FormData();
+    for (const f of fileList) fd.append("files", f);
+    setStatus("Uploading input files...");
+    try {
+        const res = await fetch("/api/input/upload", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "upload failed");
+        setStatus(`Uploaded: ${data.saved.length}, Skipped: ${data.skipped.length}`);
+        await checkInputStatus();
+    } catch (e) {
+        setStatus("Upload failed");
+        alert(String(e));
     }
 }
 
@@ -1298,13 +1433,20 @@ async function loadWeightsList() {
     try {
         const res = await fetch("/api/weights");
         const data = await res.json();
-        const dl = document.getElementById("weightsList");
-        dl.innerHTML = "";
-        data.weights.forEach(w => {
+        const sel = document.getElementById("trainWeights");
+        sel.innerHTML = "";
+        (data.weights || []).forEach(w => {
             const opt = document.createElement("option");
             opt.value = w;
-            dl.appendChild(opt);
+            opt.textContent = w;
+            sel.appendChild(opt);
         });
+        if (sel.options.length === 0) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "(weights 폴더에 .pt 없음)";
+            sel.appendChild(opt);
+        }
     } catch (e) {
         console.error("Failed to load weights", e);
     }
@@ -1436,16 +1578,38 @@ async function moveRemaining(btnEvent = null) {
   }
 }
 
+async function move_remaining_silent() {
+  try {
+    const res = await fetch("/api/move_remaining", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "copy failed");
+    setStatus(`Copied ${data.moved} unedited items to output_2`);
+  } catch (err) {
+    console.error(err);
+    setStatus("Copy unedited failed");
+  }
+}
+
 function switchPipelineTab(step) {
     if (activePipelineTab === 'gui' && step !== 'gui' && step !== '') {
-        const msg = "GUI 편집을 마치고 다른 단계로 넘어가기 전에,\n아직 편집하지 않은(Unedited) 마스크들을 Output 2(최종본)로 일괄 복사하시겠습니까?\n\n'확인'을 누르시면 'Copy Unedited to Output 2'가 실행됩니다.";
+        const msg = [
+            "GUI 편집 화면을 벗어나기 전에 확인이 필요합니다.",
+            "",
+            "아직 저장하지 않은 편집 사항이 있거나,",
+            "편집하지 않은 이미지가 output_1 상태로 남아 있을 수 있습니다.",
+            "",
+            "확인: 편집 안 한 이미지를 output_2로 자동 복사 후 이동",
+            "취소: 현재 GUI 화면에 머물러 직접 검토",
+        ].join("\n");
         if (confirm(msg)) {
-            moveRemaining();
+            move_remaining_silent();
+        } else {
+            return;
         }
     }
 
     activePipelineTab = step;
-    const tabs = ["extract", "segment", "gui", "export"];
+    const tabs = ["input", "segment", "gui", "export"];
   
     tabs.forEach(t => {
         const btn = document.getElementById("tabBtn_" + t);
@@ -1457,17 +1621,13 @@ function switchPipelineTab(step) {
         }
     });
 
-    document.getElementById("homeContainer").style.display = (step === "") ? "block" : "none";
     document.getElementById("guiContainer").style.display = (step === "gui") ? "grid" : "none";
-    document.getElementById("previewContainer").style.display = (step !== "" && step !== "gui") ? "flex" : "none";
+    document.getElementById("previewContainer").style.display = (step !== "gui") ? "flex" : "none";
 
-    document.getElementById("homeSidebarContent").style.display = (step === "") ? "block" : "none";
     document.getElementById("guiSidebarContent").style.display = (step === "gui") ? "block" : "none";
-    document.getElementById("folderSidebarContent").style.display = (step !== "" && step !== "gui") ? "block" : "none";
+    document.getElementById("folderSidebarContent").style.display = (step !== "gui") ? "block" : "none";
 
-    if (step === "") {
-        checkBags();
-    } else if (step === "gui") {
+    if (step === "gui") {
         loadList(); 
         if (baseCanvas.width > 0) fitZoomToViewerHeight();
     } else {
@@ -1478,7 +1638,7 @@ function switchPipelineTab(step) {
 }
 
 function switchExtraTab(tab) {
-    const extraTabs = ["build", "clean", "fixnames"];
+    const extraTabs = ["train", "clean"];
     extraTabs.forEach(t => {
         const btn = document.getElementById("extraBtn_" + t);
         if (btn) btn.classList.toggle("active", t === tab);
@@ -1499,7 +1659,7 @@ async function pollJob(jobId) {
       return false;
     }
     const command = Array.isArray(data.command) ? data.command.join(" ") : "";
-    const output = data.output || "";
+    const output = formatPipelineOutput(data.output || "");
     setPipelineLog(`[${data.status}] ${command}\n\n${output}`);
     
     if (data.status === "done") {
@@ -1515,13 +1675,8 @@ async function pollJob(jobId) {
 
 async function runPipelineStep(step) {
   const payload = { step };
-  if (step === "extract") {
-    payload.start = parseInt(document.getElementById("extractStart").value || "0", 10);
-    payload.end = parseInt(document.getElementById("extractEnd").value || "9", 10);
-    payload.count = parseInt(document.getElementById("extractCount").value || "100", 10);
-  } else if (step === "export") {
-    payload.bg_prefix = document.getElementById("exportBgPrefix").value || "Environment";
-    payload.export_mode = document.getElementById("exportMode").value || "copy";
+  if (step === "export") {
+    payload.bg_prefix = document.getElementById("exportBgPrefix").value;
   }
 
   setStatus(`Starting ${step}...`);
@@ -1542,46 +1697,102 @@ async function runPipelineStep(step) {
   }
 }
 
-async function runBuildAndTrain() {
-    setStatus("Starting dataset build (Train/Val split)...");
-    const buildPayload = {
-        step: "build",
-        num_classes: parseInt(document.getElementById("buildNumClasses").value || "10"),
-        val_ratio: parseFloat(document.getElementById("buildValRatio").value || "0.2"),
-        build_mode: document.getElementById("buildMode").value || "copy"
+async function runTrain() {
+    const weights = document.getElementById("trainWeights").value;
+    const modelName = document.getElementById("trainName").value.trim();
+    const numClassesRaw = document.getElementById("trainNumClasses").value.trim();
+    if (!weights || !modelName || !numClassesRaw) {
+        alert("가중치(.pt / .yaml), 모델 이름(exp_name), 클래스 개수(num_classes)는 필수입니다.");
+        return;
+    }
+    const numClasses = parseInt(numClassesRaw, 10);
+    if (!(numClasses > 0)) {
+        alert("num_classes는 1 이상의 정수여야 합니다.");
+        return;
+    }
+
+    const valRatioRaw = document.getElementById("trainValRatio").value.trim();
+    if (valRatioRaw === "") {
+        alert("val_ratio는 필수입니다.");
+        return;
+    }
+    const valRatio = parseFloat(valRatioRaw);
+    if (!(valRatio > 0.0 && valRatio < 1.0)) {
+        alert("val_ratio는 0~1 사이 값이어야 합니다.");
+        return;
+    }
+
+    const dataYaml = (pipelineConfig && pipelineConfig.defaults && pipelineConfig.defaults.training_dataset_yaml) || "";
+    const weightsDir = (pipelineConfig && pipelineConfig.defaults && pipelineConfig.defaults.weights_dir) || "";
+
+    const trainPayload = {
+        step: "train",
+        weights,
+        model_name: modelName,
+        epochs: parseInt(document.getElementById("trainEpochs").value || "100", 10),
+        batch: parseInt(document.getElementById("trainBatch").value || "16", 10),
+        imgsz: parseInt(document.getElementById("trainImgsz").value || "640", 10),
+        num_classes: numClasses,
+        val_ratio: valRatio,
     };
+    if (dataYaml) trainPayload.data = dataYaml;
+    if (weightsDir) trainPayload.project = weightsDir;
 
+    const lr0 = document.getElementById("trainLr0").value.trim();
+    if (lr0 !== "") trainPayload.lr0 = parseFloat(lr0);
+    const patience = document.getElementById("trainPatience").value.trim();
+    if (patience !== "") trainPayload.patience = parseInt(patience, 10);
+    const opt = document.getElementById("trainOptimizer").value;
+    if (opt) trainPayload.optimizer = opt;
+    const freeze = document.getElementById("trainFreeze").value.trim();
+    if (freeze !== "") trainPayload.freeze = parseInt(freeze, 10);
+    trainPayload.augment = document.getElementById("trainAugment").value || "medium";
+    const workers = document.getElementById("trainWorkers").value.trim();
+    if (workers !== "") trainPayload.workers = parseInt(workers, 10);
+    const seed = document.getElementById("trainSeed").value.trim();
+    if (seed !== "") trainPayload.seed = parseInt(seed, 10);
+
+    const resumePath = document.getElementById("trainResumePath").value.trim();
+    const resumeBool = document.getElementById("trainResumeBool").checked;
+    if (resumePath) {
+        trainPayload.resume = resumePath;
+    } else if (resumeBool) {
+        trainPayload.resume = true;
+    }
+
+    const cache = document.getElementById("trainCache").value;
+    if (cache) trainPayload.cache = cache;
+
+    const ampSel = document.getElementById("trainAmp").value;
+    if (ampSel === "true") trainPayload.amp = true;
+    else if (ampSel === "false") trainPayload.amp = false;
+
+    const cosSel = document.getElementById("trainCosLr").value;
+    if (cosSel === "true") trainPayload.cos_lr = true;
+    else if (cosSel === "false") trainPayload.cos_lr = false;
+
+    const wd = document.getElementById("trainWd").value.trim();
+    if (wd !== "") trainPayload.weight_decay = parseFloat(wd);
+    const dropout = document.getElementById("trainDropout").value.trim();
+    if (dropout !== "") trainPayload.dropout = parseFloat(dropout);
+    const savePeriod = document.getElementById("trainSavePeriod").value.trim();
+    if (savePeriod !== "") trainPayload.save_period = parseInt(savePeriod, 10);
+
+    if (document.getElementById("trainPretrainedBackboneOnly").checked) {
+        trainPayload.pretrained_backbone_only = true;
+    }
+
+    setStatus("Starting training...");
     try {
-        const buildRes = await fetch("/api/pipeline/run", {
-            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(buildPayload)
-        });
-        const buildData = await buildRes.json();
-        if (!buildRes.ok) throw new Error(buildData.detail);
-        const buildSuccess = await pollJob(buildData.job_id);
-
-        if (!buildSuccess) {
-            throw new Error("Build step failed. Training aborted.");
-        }
-
-        setStatus("Starting training...");
-        const trainPayload = {
-            step: "train",
-            weights: document.getElementById("trainWeights").value || "yolov8n.pt",
-            model_name: document.getElementById("trainName").value || "custom_model",
-            epochs: parseInt(document.getElementById("trainEpochs").value || "100"),
-            batch: parseInt(document.getElementById("trainBatch").value || "16")
-        };
         const trainRes = await fetch("/api/pipeline/run", {
             method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(trainPayload)
         });
         const trainData = await trainRes.json();
         if (!trainRes.ok) throw new Error(trainData.detail);
         await pollJob(trainData.job_id);
-
-        setStatus("Build and Train pipeline completed.");
-        alert("Train/Val 분할 및 학습이 완료되었습니다.");
+        setStatus("Training completed.");
     } catch(e) {
-        setStatus("Build/Train failed");
+        setStatus("Train failed");
         alert(e);
     }
 }
@@ -1609,38 +1820,13 @@ async function runClean() {
     }
 }
 
-async function runFixNames() {
-    setStatus("Fixing filenames...");
-    const payload = {
-        step: "fix-names",
-        dir: document.getElementById("fixNamesDir").value.trim()
-    };
-    
-    try {
-        const res = await fetch("/api/pipeline/run", {
-            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail);
-        await pollJob(data.job_id);
-        setStatus("Fix names completed.");
-    } catch(e) {
-        setStatus("Fix names failed");
-        alert(e);
-    }
-}
-
 async function loadPipelineConfig() {
   const res = await fetch("/api/pipeline/config");
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || "Failed to load pipeline config");
   pipelineConfig = data;
   
-  document.getElementById("extractStart").value = data.defaults.extract_start;
-  document.getElementById("extractEnd").value = data.defaults.extract_end;
-  document.getElementById("extractCount").value = data.defaults.extract_count;
   document.getElementById("exportBgPrefix").value = data.defaults.export_bg_prefix;
-  document.getElementById("exportMode").value = data.defaults.export_mode;
 }
 
 function setDirty(v = true) {
@@ -2093,14 +2279,32 @@ async function initApp() {
   try {
     await loadPipelineConfig();
     await loadWeightsList(); // 가중치 모델 목록 로드
-    // 최초 실행시 기본 탭 열기 설정 (extra tab 중 첫번째)
-    switchExtraTab('build'); 
+    switchExtraTab('train'); 
   } catch (err) {
     setPipelineLog(String(err));
   }
   
-  // 초기화면 렌더링 (빈 탭)
-  switchPipelineTab("");
+  const dropZone = document.getElementById("dropZone");
+  const filePicker = document.getElementById("filePicker");
+  dropZone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = "#4a90e2";
+  });
+  dropZone.addEventListener("dragleave", () => {
+    dropZone.style.borderColor = "#9db2c8";
+  });
+  dropZone.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dropZone.style.borderColor = "#9db2c8";
+    await uploadInputFiles(e.dataTransfer.files);
+  });
+  filePicker.addEventListener("change", async (e) => {
+    await uploadInputFiles(e.target.files);
+    e.target.value = "";
+  });
+
+  switchPipelineTab("input");
+  await checkInputStatus();
 }
 
 initApp();
