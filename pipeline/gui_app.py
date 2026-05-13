@@ -156,7 +156,9 @@ def _build_docker_command(step: str, payload: dict) -> list[str]:
     elif step == "gui":
         cmd.extend(["--host", "0.0.0.0", "--port", str(cfg.WEB_PORT)])
     elif step == "export":
-        cmd.extend(["--bg", str(payload.get("bg_prefix", ""))])
+        bg_prefix = str(payload.get("bg_prefix", "")).strip()
+        if bg_prefix:
+            cmd.extend(["--bg", bg_prefix])
     elif step == "train":
         cmd.extend(["--weights", str(payload["weights"])])
         cmd.extend(["--name", str(payload.get("model_name", "exp"))])
@@ -1060,9 +1062,50 @@ HTML_PAGE = r"""
     .check-result-box li {
       margin-bottom: 6px;
     }
+
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(17, 24, 39, 0.45);
+    }
+
+    .loading-box {
+      min-width: 260px;
+      padding: 22px 26px;
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.20);
+      text-align: center;
+      color: #333;
+    }
+
+    .loading-spinner {
+      width: 34px;
+      height: 34px;
+      margin: 0 auto 12px auto;
+      border: 4px solid #e5e7eb;
+      border-top-color: #4a90e2;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="loading-box">
+    <div class="loading-spinner"></div>
+    <div id="loadingText">Loading...</div>
+  </div>
+</div>
 <div class="app">
   <aside class="sidebar" id="leftSidebar">
     
@@ -1349,6 +1392,8 @@ const viewerWrapEl = document.getElementById("viewerWrap");
 const canvasStackEl = document.getElementById("canvasStack");
 const cursorOverlayEl = document.getElementById("cursorOverlay");
 const pipelineLogEl = document.getElementById("pipelineLog");
+const loadingOverlayEl = document.getElementById("loadingOverlay");
+const loadingTextEl = document.getElementById("loadingText");
 
 const stepFolderMap = {
     input: [
@@ -1368,6 +1413,15 @@ const stepFolderMap = {
 
 function setStatus(msg) { statusEl.textContent = msg; }
 function setPipelineLog(msg) { pipelineLogEl.textContent = msg || "No logs"; }
+
+function showLoading(msg = "Loading...") {
+    loadingTextEl.textContent = msg;
+    loadingOverlayEl.style.display = "flex";
+}
+
+function hideLoading() {
+    loadingOverlayEl.style.display = "none";
+}
 
 function formatPipelineOutput(raw) {
     const lines = String(raw || "").split("\n");
@@ -1584,27 +1638,36 @@ async function move_remaining_silent() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "copy failed");
     setStatus(`Copied ${data.moved} unedited items to output_2`);
+    return true;
   } catch (err) {
     console.error(err);
     setStatus("Copy unedited failed");
+    alert(`Copy unedited failed: ${String(err)}`);
+    return false;
   }
 }
 
-function switchPipelineTab(step) {
+async function switchPipelineTab(step) {
+    if (isLoading) return;
+
     if (activePipelineTab === 'gui' && step !== 'gui' && step !== '') {
         const msg = [
             "GUI 편집 화면을 벗어나기 전에 확인이 필요합니다.",
             "",
-            "아직 저장하지 않은 편집 사항이 있거나,",
-            "편집하지 않은 이미지가 output_1 상태로 남아 있을 수 있습니다.",
-            "",
-            "확인: 편집 안 한 이미지를 output_2로 자동 복사 후 이동",
-            "취소: 현재 GUI 화면에 머물러 직접 검토",
+            "확인: 편집 안 한 이미지를 output_2로 자동 복사한 뒤 이동",
+            "취소: 복사하지 않고 바로 다음 탭으로 이동",
         ].join("\n");
+
         if (confirm(msg)) {
-            move_remaining_silent();
-        } else {
-            return;
+            isLoading = true;
+            showLoading("편집 안 된 파일을 output_2로 복사하는 중...");
+            const ok = await move_remaining_silent();
+            hideLoading();
+            isLoading = false;
+
+            if (!ok) {
+                return;
+            }
         }
     }
 
@@ -1628,7 +1691,7 @@ function switchPipelineTab(step) {
     document.getElementById("folderSidebarContent").style.display = (step !== "gui") ? "block" : "none";
 
     if (step === "gui") {
-        loadList(); 
+        await loadList(); 
         if (baseCanvas.width > 0) fitZoomToViewerHeight();
     } else {
         document.getElementById("previewContent").innerHTML = '<span class="muted">Select a file from the left sidebar to preview</span>';

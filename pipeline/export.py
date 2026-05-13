@@ -24,7 +24,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--bg",
         type=str,
-        required=True,
+        default="",
+        required=False,
         help="배경 접두사 (예: paper, floor, desk, Environment)",
     )
     parser.add_argument(
