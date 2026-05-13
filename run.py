@@ -6,7 +6,7 @@
   python run.py export --bg paper
   python run.py build --num-classes 10 [--val-ratio 0.1]
   python run.py train --weights yolo26l-seg.yaml --name exp1 --epochs 100 --batch 16 --imgsz 640 [...]
-  python run.py clean --mode dataset|input|stage1|stage2|training|all
+  python run.py clean --mode dataset|input|output1|output2|training|all
   python run.py count [--dir PATH]
   python run.py fix-names [--dir PATH]
   python run.py trim stage --dir create/output_1 --keep 200

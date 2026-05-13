@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--mode",
         default="dataset",
-        choices=["dataset", "input", "stage1", "stage2", "training", "all"],
+        choices=["dataset", "input", "output1", "output2", "training", "all"],
     )
     args = parser.parse_args(argv)
 
@@ -32,12 +32,12 @@ def main(argv: list[str] | None = None) -> None:
         "input": [
             w / "input/images",
             ],
-        "stage1": [
+        "output1": [
             w / "output_1/labels",
             w / "output_1/masks",
             w / "output_1/images",
         ],
-        "stage2": [
+        "output2": [
             w / "output_2/images",
             w / "output_2/labels",
             w / "output_2/masks",

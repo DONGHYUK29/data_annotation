@@ -224,7 +224,7 @@ docker compose run --rm annotation python run.py segment
 필요하면 입력 / 출력 폴더를 직접 지정할 수 있습니다.
 
 ```bash
-docker compose run --rm annotation python run.py segment --input /path/to/images --output /path/to/stage1_root
+docker compose run --rm annotation python run.py segment --input /path/to/images --output /path/to/output1_root
 ```
 
 ---
@@ -308,8 +308,8 @@ python run.py clean --mode all
 사용 가능한 모드:
 - `dataset`
 - `input`
-- `stage1`
-- `stage2`
+- `output1`
+- `output2`
 - `training`
 - `all`
 
