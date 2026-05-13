@@ -153,6 +153,8 @@ def _build_docker_command(step: str, payload: dict) -> list[str]:
             cmd.extend(["--input", str(payload["input_dir"])])
         if payload.get("output_dir"):
             cmd.extend(["--output", str(payload["output_dir"])])
+        if payload.get("weights"):
+            cmd.extend(["--weights", str(payload["weights"])])
     elif step == "gui":
         cmd.extend(["--host", "0.0.0.0", "--port", str(cfg.WEB_PORT)])
     elif step == "export":
@@ -603,6 +605,26 @@ def api_weights():
             if p.is_file() and p.suffix.lower() in (".pt", ".yaml", ".yml")
         }
     )
+    return {"weights": names}
+
+
+@app.get("/api/segment_weights")
+def api_segment_weights():
+    wd = cfg.WEIGHTS_DIR
+    if not wd.is_dir():
+        return {"weights": []}
+
+    names: list[str] = []
+    for p in wd.rglob("*.pt"):
+        if not p.is_file():
+            continue
+        try:
+            rel = p.relative_to(wd)
+            names.append(str(rel).replace("\\", "/"))
+        except ValueError:
+            names.append(p.name)
+
+    names.sort(key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)])
     return {"weights": names}
 
 @app.get("/api/explore")
@@ -1201,7 +1223,11 @@ HTML_PAGE = r"""
       
       <div id="segmentSettings" class="settings-block" style="display: none;">
         <h4>Segment Settings</h4>
-        <div class="muted" style="margin-bottom: 12px;">Uses default input/output paths.</div>
+        <div class="field">
+          <label>Segmentation Weights (.pt)</label>
+          <select id="segmentWeights"></select>
+        </div>
+        <div class="muted" style="margin-bottom: 12px;">weights/ 하위 폴더의 .pt 파일을 자동 탐색합니다.</div>
         <button class="run-btn" onclick="runPipelineStep('segment')">▶ Run Segment</button>
       </div>
 
@@ -1506,6 +1532,33 @@ async function loadWeightsList() {
     }
 }
 
+async function loadSegmentWeights() {
+    try {
+        const res = await fetch("/api/segment_weights");
+        const data = await res.json();
+        const sel = document.getElementById("segmentWeights");
+        sel.innerHTML = "";
+
+        const defaultOpt = document.createElement("option");
+        defaultOpt.value = "";
+        defaultOpt.textContent = "기본값 사용 (config.py YOLO_WEIGHT)";
+        sel.appendChild(defaultOpt);
+
+        (data.weights || []).forEach(w => {
+            const opt = document.createElement("option");
+            opt.value = w;
+            opt.textContent = w;
+            sel.appendChild(opt);
+        });
+
+        if (sel.options.length === 1 && !(data.weights || []).length) {
+            defaultOpt.textContent = "기본값 사용 (.pt 파일 없음)";
+        }
+    } catch (e) {
+        console.error("Failed to load segment weights", e);
+    }
+}
+
 async function previewFile(filePath, fileName) {
     const container = document.getElementById("previewContent");
     container.innerHTML = '<span class="muted">Loading preview...</span>';
@@ -1740,6 +1793,10 @@ async function runPipelineStep(step) {
   const payload = { step };
   if (step === "export") {
     payload.bg_prefix = document.getElementById("exportBgPrefix").value;
+  }
+
+  if (step === "segment") {
+    payload.weights = document.getElementById("segmentWeights").value;
   }
 
   setStatus(`Starting ${step}...`);
@@ -2341,7 +2398,8 @@ window.addEventListener("resize", () => {
 async function initApp() {
   try {
     await loadPipelineConfig();
-    await loadWeightsList(); // 가중치 모델 목록 로드
+    await loadWeightsList(); // 학습용 가중치 모델 목록 로드
+    await loadSegmentWeights(); // 세그먼트용 .pt 목록 로드
     switchExtraTab('train'); 
   } catch (err) {
     setPipelineLog(String(err));

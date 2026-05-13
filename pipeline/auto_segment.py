@@ -34,6 +34,38 @@ def get_class_id_from_stem(stem: str) -> int:
     return int(stem.split("_")[0])
 
 
+def resolve_yolo_weight(weights_arg: str | None) -> Path:
+    """
+    GUI/CLI에서 전달된 weights 값을 실제 .pt 경로로 변환한다.
+    - 빈 값이면 config.py의 cfg.YOLO_WEIGHT 사용
+    - 상대 경로이면 cfg.WEIGHTS_DIR 하위로 해석
+    - 절대 경로/상대 경로 모두 최종적으로 cfg.WEIGHTS_DIR 내부 .pt만 허용
+    """
+    if weights_arg is None or str(weights_arg).strip() == "":
+        return Path(cfg.YOLO_WEIGHT)
+
+    wd = Path(cfg.WEIGHTS_DIR).resolve()
+    raw = Path(str(weights_arg).strip()).expanduser()
+
+    if raw.suffix.lower() != ".pt":
+        raise FileNotFoundError(f"세그먼트 가중치는 .pt 파일만 허용합니다: {weights_arg!r}")
+
+    if raw.is_absolute():
+        candidate = raw.resolve()
+    else:
+        candidate = (wd / raw).resolve()
+
+    try:
+        candidate.relative_to(wd)
+    except ValueError:
+        raise FileNotFoundError(f"세그먼트 가중치는 weights 폴더 내부 파일만 사용할 수 있습니다: {wd}") from None
+
+    if not candidate.is_file():
+        raise FileNotFoundError(f"세그먼트 가중치 파일을 찾을 수 없습니다: {candidate}")
+
+    return candidate
+
+
 def save_label(
     path: Path,
     class_id: int,
@@ -224,8 +256,18 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="YOLO-seg만으로 1차 마스킹")
     parser.add_argument("--input", type=Path, default=None, help="원본 이미지 폴더")
     parser.add_argument("--output", type=Path, default=None, help="output_1 에 해당하는 루트")
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default="",
+        help="weights/ 하위 .pt 경로 (예: exp1/weights/best.pt). 비우면 cfg.YOLO_WEIGHT 사용",
+    )
     args = parser.parse_args(argv)
-    run_segmentation(input_dir=args.input, out_dir=args.output)
+    run_segmentation(
+        input_dir=args.input,
+        out_dir=args.output,
+        yolo_weight=resolve_yolo_weight(args.weights),
+    )
 
 
 if __name__ == "__main__":
