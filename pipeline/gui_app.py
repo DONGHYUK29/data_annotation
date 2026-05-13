@@ -1930,8 +1930,16 @@ async function runTrain() {
         });
         const trainData = await trainRes.json();
         if (!trainRes.ok) throw new Error(trainData.detail);
-        await pollJob(trainData.job_id);
-        setStatus("Training completed.");
+        const ok = await pollJob(trainData.job_id);
+
+        if (ok) {
+            await loadWeightsList();
+            await loadSegmentWeights();
+            if (activePipelineTab === "segment") {
+                await loadSegmentWeights();
+            }
+            setStatus("Training completed. Weights list refreshed.");
+        }
     } catch(e) {
         setStatus("Train failed");
         alert(e);
