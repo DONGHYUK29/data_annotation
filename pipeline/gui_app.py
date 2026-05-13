@@ -310,7 +310,16 @@ def png_response_from_array(arr: np.ndarray) -> Response:
     ok, buf = cv2.imencode(".png", arr)
     if not ok:
         raise HTTPException(status_code=500, detail="PNG encoding failed")
-    return Response(content=buf.tobytes(), media_type="image/png")
+
+    return Response(
+        content=buf.tobytes(),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 def move_remaining_files():
@@ -1744,7 +1753,7 @@ async function switchPipelineTab(step) {
     document.getElementById("folderSidebarContent").style.display = (step !== "gui") ? "block" : "none";
 
     if (step === "gui") {
-        await loadList(); 
+        await loadList({ forceReload: true, autoFit: true });
         if (baseCanvas.width > 0) fitZoomToViewerHeight();
     } else {
         document.getElementById("previewContent").innerHTML = '<span class="muted">Select a file from the left sidebar to preview</span>';
@@ -1810,7 +1819,19 @@ async function runPipelineStep(step) {
     if (!res.ok) throw new Error(data.detail || "Failed to run pipeline step");
     currentJobId = data.job_id;
     setPipelineLog(`[queued] ${data.command}`);
-    await pollJob(currentJobId);
+
+    const ok = await pollJob(currentJobId);
+
+    if (ok && step === "segment") {
+      currentStem = null;
+      currentIndex = 0;
+
+      if (activePipelineTab === "gui") {
+        await loadList({ forceReload: true, autoFit: true });
+      } else {
+        renderLeftFolders(activePipelineTab);
+      }
+    }
   } catch (err) {
     setStatus(`Failed to start ${step}`);
     alert(String(err));
@@ -1920,10 +1941,11 @@ async function runTrain() {
 async function runClean() {
     if(!confirm("정말로 작업 폴더를 정리하시겠습니까?\n이 작업은 되돌릴 수 없습니다.")) return;
     
+    const cleanMode = document.getElementById("cleanMode").value;
     setStatus("Cleaning workspace...");
     const payload = {
         step: "clean",
-        clean_mode: document.getElementById("cleanMode").value
+        clean_mode: cleanMode
     };
     
     try {
@@ -1932,8 +1954,28 @@ async function runClean() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail);
-        await pollJob(data.job_id);
-        setStatus("Workspace clean completed.");
+
+        const ok = await pollJob(data.job_id);
+
+        if (ok) {
+            if (
+                cleanMode === "all" ||
+                cleanMode === "input" ||
+                cleanMode === "output1" ||
+                cleanMode === "output2"
+            ) {
+                currentStem = null;
+                currentIndex = 0;
+
+                if (activePipelineTab === "gui") {
+                    await loadList({ forceReload: true, autoFit: true });
+                } else {
+                    renderLeftFolders(activePipelineTab);
+                }
+            }
+
+            setStatus("Workspace clean completed.");
+        }
     } catch(e) {
         setStatus("Clean failed");
         alert(e);
@@ -2136,17 +2178,70 @@ function fitZoomToViewerHeight() {
   updateCursor();
 }
 
-async function loadList() {
-  const res = await fetch("/api/images");
+function cacheBust(url) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}_=${Date.now()}`;
+}
+
+function clearViewer() {
+  baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+  baseCanvas.width = 0;
+  baseCanvas.height = 0;
+  maskCanvas.width = 0;
+  maskCanvas.height = 0;
+
+  canvasStackEl.style.width = "0px";
+  canvasStackEl.style.height = "0px";
+
+  currentStem = null;
+  currentIndex = 0;
+  undoStack = [];
+  samPoints = [];
+  setDirty(false);
+  currentInfoEl.dataset.baseText = "";
+  currentInfoEl.textContent = "";
+  renderList();
+}
+
+async function loadList(opts = {}) {
+  const { forceReload = false, autoFit = true } = opts;
+
+  const res = await fetch(cacheBust("/api/images"), { cache: "no-store" });
   const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "Failed to load image list");
+
   items = data.items || [];
   countInfoEl.textContent = `Total: ${data.count}`;
   renderList();
 
-  if (items.length > 0 && !currentStem) {
-    await loadByIndex(0, { autoFit: true, autoSaveBefore: false });
-  } else if (items.length === 0) {
+  if (items.length === 0) {
+    clearViewer();
     setStatus("No images found");
+    return;
+  }
+
+  let nextIndex = 0;
+
+  if (!forceReload && currentStem) {
+    const found = items.indexOf(currentStem);
+    if (found >= 0) {
+      nextIndex = found;
+    } else {
+      currentStem = null;
+      currentIndex = 0;
+    }
+  }
+
+  if (forceReload || !currentStem) {
+    await loadByIndex(nextIndex, {
+      autoFit,
+      autoSaveBefore: false,
+      forceReload: true,
+    });
+  } else {
+    renderList();
   }
 }
 
@@ -2164,7 +2259,7 @@ function renderList() {
 }
 
 async function loadByIndex(idx, opts = {}) {
-  const { autoFit = false, autoSaveBefore = true } = opts;
+  const { autoFit = false, autoSaveBefore = true, forceReload = false } = opts;
   if (idx < 0 || idx >= items.length || isLoading) return;
 
   if (autoSaveBefore && currentStem && isDirty) {
@@ -2176,26 +2271,31 @@ async function loadByIndex(idx, opts = {}) {
   currentIndex = idx;
   currentStem = items[idx];
   renderList();
-  setStatus("Loading...");
+  setStatus(forceReload ? "Reloading..." : "Loading...");
+
+  let imgUrl = null;
+  let maskUrl = null;
 
   try {
+    const stem = encodeURIComponent(currentStem);
+
     const [imgBlob, maskBlob, metaRes] = await Promise.all([
-      fetch(`/api/image/${encodeURIComponent(currentStem)}`).then(r => {
+      fetch(cacheBust(`/api/image/${stem}`), { cache: "no-store" }).then(r => {
         if (!r.ok) throw new Error("Failed to fetch image");
         return r.blob();
       }),
-      fetch(`/api/mask/${encodeURIComponent(currentStem)}`).then(r => {
+      fetch(cacheBust(`/api/mask/${stem}`), { cache: "no-store" }).then(r => {
         if (!r.ok) throw new Error("Failed to fetch mask");
         return r.blob();
       }),
-      fetch(`/api/meta/${encodeURIComponent(currentStem)}`).then(r => {
+      fetch(cacheBust(`/api/meta/${stem}`), { cache: "no-store" }).then(r => {
         if (!r.ok) throw new Error("Failed to fetch metadata");
         return r.json();
       }),
     ]);
 
-    const imgUrl = URL.createObjectURL(imgBlob);
-    const maskUrl = URL.createObjectURL(maskBlob);
+    imgUrl = URL.createObjectURL(imgBlob);
+    maskUrl = URL.createObjectURL(maskBlob);
 
     const img = await loadImage(imgUrl);
     const mask = await loadImage(maskUrl);
@@ -2222,15 +2322,15 @@ async function loadByIndex(idx, opts = {}) {
     if (autoFit) fitZoomToViewerHeight();
     else applyZoom();
 
-    URL.revokeObjectURL(imgUrl);
-    URL.revokeObjectURL(maskUrl);
-
     setStatus(`Loaded: ${currentStem}`);
   } catch (err) {
     console.error(err);
+    clearViewer();
     setStatus("Load failed");
     alert(String(err));
   } finally {
+    if (imgUrl) URL.revokeObjectURL(imgUrl);
+    if (maskUrl) URL.revokeObjectURL(maskUrl);
     isLoading = false;
   }
 }

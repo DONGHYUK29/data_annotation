@@ -20,7 +20,7 @@ def clean_filename(name: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Export stage2 → merged dataset (copy only)")
+    parser = argparse.ArgumentParser(description="Export output2 → merged dataset (copy only)")
     parser.add_argument(
         "--bg",
         type=str,
@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> None:
         "--src",
         type=Path,
         default=None,
-        help="stage2 root (default cfg.STAGE2_DIR)",
+        help="output2 root (default cfg.output2_DIR)",
     )
     parser.add_argument(
         "--dst",
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    src_root = args.src or cfg.STAGE2_DIR
+    src_root = args.src or cfg.OUTPUT2_DIR
     dst_root = args.dst or cfg.DATASET_DIR
 
     src_image = src_root / "images"
