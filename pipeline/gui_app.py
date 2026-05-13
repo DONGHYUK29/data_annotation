@@ -24,12 +24,12 @@ from .sam_backend import predict_sam_mask
 cfg.ensure_stage_dirs()
 
 IMAGE_DIR = cfg.IMAGES_RAW_DIR
-MASK_DIR = cfg.STAGE1_MASKS
-LABEL_DIR = cfg.STAGE1_LABELS
+MASK_DIR = cfg.OUTPUT1_MASKS
+LABEL_DIR = cfg.OUTPUT1_LABELS
 
-AFTER_IMAGE_DIR = cfg.STAGE2_IMAGES
-AFTER_MASK_DIR = cfg.STAGE2_MASKS
-AFTER_LABEL_DIR = cfg.STAGE2_LABELS
+AFTER_IMAGE_DIR = cfg.OUTPUT2_IMAGES
+AFTER_MASK_DIR = cfg.OUTPUT2_MASKS
+AFTER_LABEL_DIR = cfg.OUTPUT2_LABELS
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,9 +52,9 @@ PIPELINE_STEPS = ("input", "segment", "gui", "export", "train", "clean", "fix-na
 
 PIPELINE_DIRS = {
     "input_images": cfg.INPUT_IMAGES_DIR,
-    "segment_images": cfg.STAGE1_DIR / "images",
-    "segment_labels": cfg.STAGE1_LABELS,
-    "segment_masks": cfg.STAGE1_MASKS,
+    "segment_images": cfg.OUTPUT1_DIR / "images",
+    "segment_labels": cfg.OUTPUT1_LABELS,
+    "segment_masks": cfg.OUTPUT1_MASKS,
     "export_images": cfg.DATASET_DIR / "images",
     "export_labels": cfg.DATASET_DIR / "labels",
     "export_masks": cfg.DATASET_DIR / "masks",
@@ -1371,8 +1371,8 @@ HTML_PAGE = r"""
               <option value="all">all</option>
               <option value="dataset">dataset</option>
               <option value="input">input</option>
-              <option value="stage1">stage1</option>
-              <option value="stage2">stage2</option>
+              <option value="output1">output1</option>
+              <option value="output2">output2</option>
               <option value="training">training</option>
             </select>
           </div>

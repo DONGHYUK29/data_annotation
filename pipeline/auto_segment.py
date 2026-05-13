@@ -173,7 +173,7 @@ def run_segmentation(
     batch_size: int | None = None,
 ) -> None:
     input_dir = input_dir or cfg.IMAGES_RAW_DIR
-    out_root = out_dir or cfg.STAGE1_DIR
+    out_root = out_dir or cfg.OUTPUT1_DIR
 
     mask_dir = out_root / "masks"
     label_dir = out_root / "labels"

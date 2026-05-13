@@ -64,16 +64,16 @@ INPUT_IMAGES_DIR = INPUT_DIR / "images"
 IMAGES_RAW_DIR = INPUT_IMAGES_DIR
 
 # 1차 자동 마스킹 (YOLO-seg + SAM) 결과
-STAGE1_DIR = WORKSPACE_ROOT / "output_1"
-STAGE1_MASKS = STAGE1_DIR / "masks"
-STAGE1_LABELS = STAGE1_DIR / "labels"
-STAGE1_OVERLAYS = STAGE1_DIR / "images"
+OUTPUT1_DIR = WORKSPACE_ROOT / "output_1"
+OUTPUT1_MASKS = OUTPUT1_DIR / "masks"
+OUTPUT1_LABELS = OUTPUT1_DIR / "labels"
+OUTPUT1_IMAGES = OUTPUT1_DIR / "images"
 
 # Web GUI 정제 결과 (최종 라벨)
-STAGE2_DIR = WORKSPACE_ROOT / "output_2"
-STAGE2_IMAGES = STAGE2_DIR / "images"
-STAGE2_MASKS = STAGE2_DIR / "masks"
-STAGE2_LABELS = STAGE2_DIR / "labels"
+OUTPUT2_DIR = WORKSPACE_ROOT / "output_2"
+OUTPUT2_IMAGES = OUTPUT2_DIR / "images"
+OUTPUT2_MASKS = OUTPUT2_DIR / "masks"
+OUTPUT2_LABELS = OUTPUT2_DIR / "labels"
 
 # export_dataset 이 모으는 폴더
 DATASET_DIR = WORKSPACE_ROOT / "dataset"
@@ -111,12 +111,12 @@ def ensure_stage_dirs() -> None:
     """필요한 출력 폴더 생성."""
     for p in (
         INPUT_IMAGES_DIR,
-        STAGE1_MASKS,
-        STAGE1_LABELS,
-        STAGE1_OVERLAYS,
-        STAGE2_IMAGES,
-        STAGE2_MASKS,
-        STAGE2_LABELS,
+        OUTPUT1_MASKS,
+        OUTPUT1_LABELS,
+        OUTPUT1_IMAGES,
+        OUTPUT2_IMAGES,
+        OUTPUT2_MASKS,
+        OUTPUT2_LABELS,
         DATASET_IMAGES,
         DATASET_MASKS,
         DATASET_LABELS,
