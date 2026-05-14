@@ -347,6 +347,27 @@ def get_mask_path_to_load(stem: str) -> Path | None:
     return None
 
 
+def has_output1_artifact(stem: str) -> bool:
+    return (MASK_DIR / f"{stem}.png").exists() or (LABEL_DIR / f"{stem}.txt").exists()
+
+
+def count_remaining_files_to_move() -> int:
+    pending = 0
+    for image_path in list_input_images():
+        stem = image_path.stem
+        edited_mask = AFTER_MASK_DIR / f"{stem}_edited.png"
+        moved_mask = AFTER_MASK_DIR / f"{stem}.png"
+
+        if edited_mask.exists() or moved_mask.exists():
+            continue
+        if not has_output1_artifact(stem):
+            continue
+
+        pending += 1
+
+    return pending
+
+
 def png_response_from_array(arr: np.ndarray) -> Response:
     ok, buf = cv2.imencode(".png", arr)
     if not ok:
@@ -378,6 +399,9 @@ def move_remaining_files():
         base_mask = MASK_DIR / f"{stem}.png"
         base_label = LABEL_DIR / f"{stem}.txt"
 
+        if not base_mask.exists() and not base_label.exists():
+            continue
+
         dst_image = AFTER_IMAGE_DIR / f"{stem}.png"
         dst_mask = AFTER_MASK_DIR / f"{stem}.png"
         dst_label = AFTER_LABEL_DIR / f"{stem}.txt"
@@ -406,6 +430,11 @@ def move_remaining_files():
 def api_move_remaining():
     moved = move_remaining_files()
     return {"ok": True, "moved": moved}
+
+
+@app.get("/api/move_remaining/status")
+def api_move_remaining_status():
+    return {"ok": True, "pending": count_remaining_files_to_move()}
 
 
 @app.get("/api/images")
@@ -1948,8 +1977,12 @@ async function moveRemaining(btnEvent = null) {
   try {
     const res = await fetch("/api/move_remaining", { method: "POST" });
     const data = await res.json();
-    setStatus(`Copied ${data.moved} items`);
-    alert(`성공적으로 처리되었습니다.\nCopied unedited items to output_2: ${data.moved}`);
+    if ((data.moved || 0) > 0) {
+      setStatus(`Copied ${data.moved} items`);
+      alert(`성공적으로 처리되었습니다.\nCopied unedited items to output_2: ${data.moved}`);
+    } else {
+      setStatus("No output_1 items to copy");
+    }
   } catch (err) {
     console.error(err);
     setStatus("Copy failed");
@@ -1978,26 +2011,45 @@ async function move_remaining_silent() {
   }
 }
 
+async function getMoveRemainingPendingCount() {
+  const res = await fetch(cacheBust("/api/move_remaining/status"), { cache: "no-store" });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "status check failed");
+  return data.pending || 0;
+}
+
 async function switchPipelineTab(step) {
     if (isLoading) return;
 
     if (activePipelineTab === 'gui' && step !== 'gui' && step !== '') {
-        const msg = [
+        let pendingMoveCount = 0;
+        try {
+            pendingMoveCount = await getMoveRemainingPendingCount();
+        } catch (err) {
+            console.error(err);
+            setStatus("Copy status check failed");
+            alert(`Copy status check failed: ${String(err)}`);
+            return;
+        }
+
+        if (pendingMoveCount > 0 || isDirty) {
+            const msg = [
             "GUI 편집 화면을 벗어나기 전에 확인이 필요합니다.",
             "",
             "확인: 편집 안 한 이미지를 output_2로 자동 복사한 뒤 이동",
             "취소: 복사하지 않고 바로 다음 탭으로 이동",
-        ].join("\n");
+            ].join("\n");
 
-        if (confirm(msg)) {
-            isLoading = true;
-            showLoading("편집 안 된 파일을 output_2로 복사하는 중...");
-            const ok = await move_remaining_silent();
-            hideLoading();
-            isLoading = false;
+            if (confirm(msg)) {
+                isLoading = true;
+                showLoading("편집 안 된 파일을 output_2로 복사하는 중...");
+                const ok = await move_remaining_silent();
+                hideLoading();
+                isLoading = false;
 
-            if (!ok) {
-                return;
+                if (!ok) {
+                    return;
+                }
             }
         }
     }
