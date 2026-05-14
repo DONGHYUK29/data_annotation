@@ -1,379 +1,316 @@
-# 데이터 어노테이션 파이프라인 README
+# Data Annotation SW
 
-RealSense **`.bag`** 파일에서 프레임 이미지를 추출하고, **YOLO**으로 1차 마스킹 및 세그먼테이션을 수행한 뒤, **GUI**에서 마스크를 정제하여 최종적으로 **YOLO 세그멘테이션 학습 데이터셋**까지 생성하는 파이프라인입니다.
+YOLO segmentation 데이터셋을 만들고 학습까지 이어가기 위한 로컬 annotation 파이프라인입니다.
 
----
-
-## 1. 파이프라인 흐름
-
-전체 작업 순서는 다음과 같습니다.
-
-1. **Extract**  
-   `bag/` 폴더의 `.bag` 파일에서 프레임을 추출합니다.  
-   추출 결과는 아래 두 위치에 저장됩니다.
-
-   - `create/input/images/` : RGB 이미지 PNG
-   - `create/input/rgbd/` : RGB-D 원본 `.npz`
-
-   즉, 같은 샘플에 대해 RGB 학습 입력과 RGB-D 원본을 함께 보관합니다.
-
-
-2. **Segment**  
-   `create/input/images/` 이미지를 대상으로 YOLO 기반 1차 자동 마스킹을 수행합니다.  
-   결과는 `create/output_1/`에 저장됩니다.
-
-   저장 항목:
-   - 오버레이 이미지
-   - 클래스 / bbox / polygon 정보 txt
-   - 마스크 PNG
-
-
-3. **GUI 정제**  
-   자동 생성된 마스크를 GUI에서 수정 및 보정합니다.  
-   결과는 `create/output_2/`에 저장됩니다.
-
-   저장 항목:
-   - 정제된 이미지
-   - 수정된 클래스 / bbox / polygon 정보 txt
-   - 수정된 마스크 PNG
-
-   GUI에는 **Copy Unedited to Output2** 기능이 포함되어 있습니다.  
-   이 기능은 아직 직접 수정하지 않은 항목에 대해 `output_1` 결과를 `output_2`로 그대로 복사하여 최종본에 포함시키는 용도입니다.
-
-   이미 `output_2`에 존재하는 항목은 다시 복사하지 않으므로, 같은 상태에서 다시 실행하면 복사 개수는 `0`이 됩니다.
-
-
-4. **Export**  
-   정제된 결과를 `create/dataset/`으로 통합합니다.  
-   이때 다음 항목이 함께 모입니다.
-
-   - `dataset/images/`
-   - `dataset/masks/`
-   - `dataset/labels/`
-   - `dataset/rgbd/`
-
-즉, 전체 파이프라인은 아래와 같이 정리할 수 있습니다.
+현재 코드 기준의 기본 흐름은 다음과 같습니다.
 
 ```text
-.bag 파일 → RGB / RGB-D 추출 → 1차 자동 마스킹 → GUI 정제 → dataset 통합
+입력 이미지 업로드/배치
+  -> YOLO-seg 1차 자동 마스크 생성
+  -> Web GUI에서 브러시/지우개/SAM point로 마스크 보정
+  -> dataset/으로 export
+  -> train/val split 및 YOLO 학습
 ```
 
----
+## 주요 기능
 
-## 2. 사전 준비
+- 이미지 입력: `create/input/images/`에 PNG/JPG/JPEG/BMP 파일 배치 또는 Web GUI 업로드
+- 자동 세그멘테이션: Ultralytics YOLO-seg 모델로 1차 마스크 생성
+- 수동 보정 GUI: 브러시, 지우개, undo, SAM point assist 지원
+- 결과 복사: 보정하지 않은 샘플도 `output_2`로 일괄 복사 가능
+- 데이터셋 export: `create/output_2` 결과를 `create/dataset`으로 통합
+- 학습 준비: `create/dataset`을 train/val로 나누고 `dataset.yaml` 생성
+- YOLO 학습: `run.py train`에서 split 생성, label 정규화, 학습 실행
 
-본 프로젝트는 Docker 기반 실행을 기준으로 사용합니다.
-
-### 2.1 필수 설치 항목
-
-#### Windows (NVIDIA GPU 사용 기준)
-- NVIDIA 그래픽 드라이버 설치
-- WSL2 설치 및 활성화
-- WSL2용 Linux 배포판 설치 (recommend: Ubuntu)
-- WSL2 업데이트 (`wsl --update`)
-- Docker Desktop 설치
-- Docker Desktop에서 WSL2 backend 활성화
-
-※ Docker Desktop에는 Docker Engine, Docker CLI, Docker Compose가 포함되므로 별도 Compose 설치는 일반적으로 필요하지 않음
-
-#### macOS
-- Docker Desktop 설치
-- Docker Desktop에는 Docker Engine, Docker CLI, Docker Compose가 포함되므로 별도 Compose 설치는 일반적으로 필요하지 않음
-- 단, 현재 Dockerfile은 NVIDIA CUDA 기반 이미지이므로 기본 설정 그대로는 GPU 가속 대상이 아님
-
-#### Linux (NVIDIA GPU 사용 기준)
-- Docker Engine 설치
-- Docker Compose plugin 설치
-- NVIDIA 드라이버 설치
-- NVIDIA Container Toolkit 설치
-
-### 2.2 프로젝트 파일 준비
-- 저장소 clone
-- `weights/` 폴더에 YOLO/SAM 가중치 배치
-- `bag/` 폴더 또는 입력 이미지 준비
-- `config.py`에서 경로 및 가중치 파일명 확인
-
-### 2.3 GUI 실행 방식
-- GUI는 웹 기반으로 실행됨
-- 컨테이너 실행 후 브라우저에서 접속하여 사용
-- 기본 포트는 7860
-- http://localhost:7860/
-
-### 2.4 기본 폴더 구조
+## 디렉터리 구조
 
 ```text
-프로젝트루트/
-  config.py
-  run.py
-  weights/
-  bag/
-  create/
-    input/
-      images/
-      rgbd/
-    output_1/
-    output_2/
-    dataset/
-      images/
-      masks/
-      labels/
-      rgbd/
-    training/
+.
+├─ config.py
+├─ run.py
+├─ Dockerfile
+├─ docker-compose.yml
+├─ requirements-docker.txt
+├─ weights/
+│  ├─ yolo26l-seg_finetuned_mix_2000.pt
+│  └─ sam_vit_b_01ec64.pth
+├─ create/
+│  ├─ input/
+│  │  └─ images/
+│  ├─ output_1/
+│  │  ├─ images/
+│  │  ├─ masks/
+│  │  └─ labels/
+│  ├─ output_2/
+│  │  ├─ images/
+│  │  ├─ masks/
+│  │  └─ labels/
+│  ├─ dataset/
+│  │  ├─ images/
+│  │  ├─ masks/
+│  │  └─ labels/
+│  └─ training/
+└─ pipeline/
 ```
 
----
+## 준비
 
-## 3. 파일 설명
+### 1. 모델 파일 배치
 
-### 3.1 `config.py`
+기본 설정은 [config.py](config.py)에 있습니다.
 
-`config.py`는 프로젝트 전반에서 사용하는 **디렉토리 경로와 가중치 파일 경로를 관리하는 설정 파일**입니다.
+기본 필요 파일:
 
-다른 PC에서 프로젝트를 실행할 때는 가장 먼저 이 파일을 확인해야 합니다.  
-주요 설정 대상은 다음과 같습니다.
+- YOLO segmentation weight: `weights/yolo26l-seg_finetuned_mix_2000.pt`
+- SAM checkpoint: `weights/sam_vit_b_01ec64.pth`
 
-- `PROJECT_ROOT`
-- `WORKSPACE_ROOT`
-- `BAG_DIR`
-- `INPUT_IMAGES_DIR`
-- `INPUT_RGBD_DIR`
-- `DATASET_RGBD`
-- `WEIGHTS_DIR`
-- `YOLO_WEIGHT`
-- `SAM_WEIGHT`
+파일명이 다르면 `config.py`의 `YOLO_WEIGHT`, `SAM_WEIGHT`를 수정하거나, segmentation 실행 시 `--weights`로 YOLO weight를 지정하세요.
 
-필요하면 환경 변수로 일부 경로를 덮어쓸 수 있습니다.
+### 2. 입력 이미지 이름
 
-- `ANNOTATION_PROJECT_ROOT`
-- `ANNOTATION_WORKSPACE`
-- `ANNOTATION_WEIGHTS_DIR`
+자동 세그멘테이션은 파일명 첫 토큰을 class id로 사용합니다.
 
-### 3.2 `run.py`
+권장 예시:
 
-`run.py`는 이 프로젝트의 **통합 실행 진입점**입니다.  
-각 단계는 `run.py`의 하위 명령 형태로 실행합니다.
-
-명령어는 다음과 같습니다.
-
-주요 명령어
-- `extract` : `.bag` 파일에서 이미지 추출
-- `segment` : 1차 자동 마스킹 수행
-- `gui` : GUI 기반 마스크 정제
-- `export` : 정제 결과를 dataset 형식으로 통합
-
-
-기타 명령어
-- `build` : train / val 분할 및 `dataset.yaml` 생성
-- `count` : 클래스별 샘플 수 확인
-- `clean` : 작업 폴더 삭제
-- `trim` : 샘플 수 줄이기
-- `fix-names` : 입력 파일명 정리
-
----
-
-## 4. Docker 실행 전체 흐름
-
-아래 순서대로 진행하면 전체 파이프라인을 실행할 수 있습니다.
-
-### 4.1 Docker 이미지 빌드
-
-프로젝트 루트에서 먼저 이미지를 빌드합니다. (최초 1회만 빌드, 이후에는 Docker Desktop -> Containers -> data_annotation_sw -> Actions -> start)
-
-```bash
-docker compose build
-```
-
-GPU가 없는 환경에서는 CPU 전용 이미지로 별도 빌드할 수도 있습니다.
-
-```bash
-docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu -t data-annotation-sw:cpu .
-```
-
----
-
-### 4.2 `.bag` 파일에서 이미지 추출
-
-`bag/` 폴더의 `.bag` 파일에서 프레임을 추출합니다.
-
-추출 결과:
-- `create/input/images/` : RGB 이미지 PNG
-- `create/input/rgbd/` : RGB-D 원본 `.npz`
-
-```bash
-docker compose run --rm annotation python run.py extract --start 0 --end 9 --count 100
-```
-
-#### 주요 옵션
-- `--start` : 시작 bag 번호
-- `--end` : 끝 bag 번호
-- `--count` : 각 bag에서 추출할 이미지 수
-- `--bag-dir` : bag 폴더 직접 지정
-- `--rgb-out` : RGB 이미지 저장 폴더 직접 지정
-- `--rgbd-out` : RGB-D 원본 저장 폴더 직접 지정
----
-
-### 4.3 1차 자동 마스킹
-
-YOLO 기반으로 자동 마스킹/세그멘테이션을 수행합니다.  
-결과는 `create/output_1/`에 저장됩니다.
-
-```bash
-docker compose run --rm annotation python run.py segment
-```
-
-필요하면 입력 / 출력 폴더를 직접 지정할 수 있습니다.
-
-```bash
-docker compose run --rm annotation python run.py segment --input /path/to/images --output /path/to/output1_root
-```
-
----
-
-### 4.4 GUI 정제
-
-자동 생성된 마스크를 GUI에서 수정합니다.   
-브러시, 지우개, SAM 포인트 등을 사용해 마스크를 직접 보정할 수 있습니다.
-
-```bash
-docker compose run --rm --service-ports annotation python run.py gui --host 0.0.0.0 --port 7860
-```
-http://localhost:7860/
-   <- 해당 주소에서 GUI 프로그램 실행
-
-기본적으로 다음 데이터를 사용합니다.
-
-- 원본 이미지: `create/input/images/`
-- 초기 마스크: `create/output_1/masks/`
-- 저장 결과: `create/output_2/`
-
----
-
-### 4.5 Export
-
-GUI에서 정제한 결과를 최종 dataset 구조로 모읍니다.  
-이때 파일명 앞에 배경 접두사를 붙여 통합합니다.
-
-```bash
-docker compose run --rm annotation python run.py export --bg paper --mode copy
-```
-
-#### 주요 옵션
-- `--bg` : 배경 이름 또는 작업 구분자
-- `--mode` : `copy` 또는 `move`
-
-Export 시 다음 항목이 함께 복사 또는 이동됩니다.
-
-- `output_2/images` → `dataset/images`
-- `output_2/masks` → `dataset/masks`
-- `output_2/labels` → `dataset/labels`
-- `input/rgbd` → `dataset/rgbd`
-
-예시 파일명:
 ```text
-paper_1_15.png
-paper_1_15.txt
-paper_1_15.npz
+0_1.png
+0_2.png
+1_1.png
+2_15.jpg
 ```
 
----
-
-## 5. 기타 기능
-
-아래 기능들은 전체 GUI 흐름과 직접 연결되지는 않지만, 작업 정리나 데이터 관리에 유용합니다.
-
-
-### 5.1 Train / Val 분할
-
-최종 dataset을 학습용 / 검증용으로 나누고 `dataset.yaml`을 생성합니다.
-
-```bash
-docker compose run --rm annotation python run.py build --num-classes 7 --val-ratio 0.2 --mode copy
-```
-
-#### 주요 옵션
-- `--num-classes` : 클래스 수
-- `--val-ratio` : validation 비율
-- `--mode` : `copy` 또는 `move`
-
----
-
-### 5.2 전체 삭제 / 작업 폴더 비우기
-
-워크스페이스 하위 폴더를 정리할 때 사용합니다.
-
-```bash
-python run.py clean --mode all
-```
-
-사용 가능한 모드:
-- `dataset`
-- `input`
-- `output1`
-- `output2`
-- `training`
-- `all`
-
-> 주의: 해당 폴더 내용이 삭제되므로 사용 시 주의해야 합니다.
-
----
-
-### 5.3 입력 파일명 정리
-
-예를 들어 `class_2_8` 같은 이름에서 `class_` 접두사를 제거할 때 사용합니다.
+`class_2_8.png`처럼 시작하는 파일은 다음 명령으로 `2_8.png` 형태로 바꿀 수 있습니다.
 
 ```bash
 python run.py fix-names
 ```
 
-필요하면 `--dir` 옵션으로 다른 폴더를 지정할 수 있습니다.
+## Docker 실행
 
----
+이 프로젝트는 Docker Compose 기준으로 바로 Web GUI가 뜨도록 구성되어 있습니다. GPU 사용을 전제로 `docker-compose.yml`에 `gpus: all`이 설정되어 있습니다.
 
-### 5.4 클래스별 개수 확인
+```bash
+docker compose build
+docker compose up annotation
+```
 
-현재 dataset 내 클래스별 샘플 수를 확인합니다.
+브라우저에서 접속:
+
+```text
+http://localhost:7860
+```
+
+한 번만 실행하고 종료되는 CLI 명령은 다음 형태로 실행합니다.
+
+```bash
+docker compose run --rm annotation python run.py segment
+```
+
+GUI처럼 포트를 열어야 하는 명령은 다음처럼 실행합니다.
+
+```bash
+docker compose run --rm --service-ports annotation python run.py gui --host 0.0.0.0 --port 7860
+```
+
+## 로컬 실행
+
+로컬 Python 환경에서 실행하려면 `requirements-docker.txt`의 패키지가 필요합니다. CUDA, PyTorch, `segment-anything`, Ultralytics 환경이 맞아야 하므로 보통은 Docker 실행을 권장합니다.
+
+GUI 실행:
+
+```bash
+python run.py gui
+```
+
+인자 없이 `python run.py`만 실행해도 GUI가 시작됩니다.
+
+## 파이프라인 명령
+
+### 1. 입력 이미지 준비
+
+이미지를 직접 넣는 위치:
+
+```text
+create/input/images/
+```
+
+또는 Web GUI의 input 탭에서 업로드할 수 있습니다.
+
+### 2. 1차 자동 마스크 생성
+
+```bash
+python run.py segment
+```
+
+입출력 경로와 weight 지정:
+
+```bash
+python run.py segment --input create/input/images --output create/output_1 --weights yolo26l-seg_finetuned_mix_2000.pt
+```
+
+결과:
+
+- `create/output_1/images/`: 마스크 overlay 이미지
+- `create/output_1/masks/`: binary mask PNG
+- `create/output_1/labels/`: YOLO-seg label TXT
+
+참고: `--weights`는 `weights/` 안의 `.pt` 파일만 허용합니다.
+
+### 3. GUI 보정
+
+```bash
+python run.py gui --host 0.0.0.0 --port 7860
+```
+
+GUI는 다음 데이터를 사용합니다.
+
+- 원본 이미지: `create/input/images/`
+- 초기 마스크: `create/output_1/masks/`
+- 초기 라벨: `create/output_1/labels/`
+- 저장 결과: `create/output_2/`
+
+보정 저장 시:
+
+- 이미지: `create/output_2/images/{stem}.png`
+- 마스크: `create/output_2/masks/{stem}_edited.png`
+- 라벨: `create/output_2/labels/{stem}.txt`
+
+GUI의 remaining copy 기능은 아직 보정하지 않은 샘플을 `output_1`에서 `output_2`로 복사합니다.
+
+### 4. Dataset export
+
+```bash
+python run.py export --bg paper
+```
+
+`--bg` 값은 파일명 앞에 prefix로 붙습니다.
+
+예시:
+
+```text
+create/output_2/images/2_8.png
+  -> create/dataset/images/paper_2_8.png
+create/output_2/labels/2_8.txt
+  -> create/dataset/labels/paper_2_8.txt
+```
+
+지원 옵션:
+
+```bash
+python run.py export --bg floor --src create/output_2 --dst create/dataset
+```
+
+결과:
+
+- `create/dataset/images/`
+- `create/dataset/masks/`
+- `create/dataset/labels/`
+
+### 5. Train/Val split 생성
+
+```bash
+python run.py build --num-classes 7 --val-ratio 0.2
+```
+
+결과:
+
+- `create/training/images/train/`
+- `create/training/images/val/`
+- `create/training/labels/train/`
+- `create/training/labels/val/`
+- `create/training/dataset.yaml`
+
+split은 `배경 prefix + class id` 그룹 기준으로 나눕니다. 즉 export 이후의 파일명은 `paper_2_8.png`처럼 첫 토큰이 배경, 두 번째 토큰이 class id인 형태가 안전합니다.
+
+### 6. YOLO 학습
+
+```bash
+python run.py train \
+  --weights yolo26l-seg.yaml \
+  --name exp1 \
+  --epochs 100 \
+  --batch 16 \
+  --imgsz 640 \
+  --num-classes 7 \
+  --val-ratio 0.2
+```
+
+`train` 명령은 학습 전에 내부적으로 `build`를 실행하고, `create/training/dataset.yaml`을 기본 데이터셋 설정으로 사용합니다.
+
+주요 옵션:
+
+- `--weights`: `weights/` 안의 `.pt`, `.yaml`, `.yml`
+- `--name`: 학습 실험 이름
+- `--epochs`, `--batch`, `--imgsz`
+- `--num-classes`, `--val-ratio`
+- `--project`: 결과 저장 위치, 기본값은 `weights/`
+- `--augment`: `low`, `medium`, `high`
+- `--optimizer`: `SGD`, `Adam`, `AdamW`, `NAdam`, `RAdam`, `RMSProp`, `auto`
+- `--resume`, `--cache`, `--amp`, `--cos-lr`
+
+## 기타 명령
+
+### 클래스별 샘플 수 확인
 
 ```bash
 python run.py count
+python run.py count --dir create/dataset/images
 ```
 
-필요하면 `--dir` 옵션으로 다른 경로를 지정할 수 있습니다.
+### 작업 폴더 정리
 
----
+```bash
+python run.py clean --mode dataset
+python run.py clean --mode input
+python run.py clean --mode output1
+python run.py clean --mode output2
+python run.py clean --mode training
+python run.py clean --mode all
+```
 
-### 5.5 샘플 수 줄이기
+주의: 지정한 작업 폴더 내부 파일이 삭제됩니다.
 
-테스트용으로 데이터 수를 줄이거나, 배경/클래스별 개수를 조절할 때 사용합니다.
+### stage 결과 샘플 수 줄이기
 
-#### stage 기준 줄이기
 ```bash
 python run.py trim stage --dir create/output_1 --keep 200
 ```
 
-#### dataset 기준 줄이기
+### dataset 샘플 수 줄이기
+
 ```bash
 python run.py trim dataset
 ```
 
----
+`trim dataset`은 [config.py](config.py)의 `STACK_TRIM_KEEP_PER_BG` 값을 기준으로 배경별, 클래스별 샘플 수를 줄입니다.
 
-## 6. 권장 실행 순서
+## 설정
 
-실제로는 아래 순서만 따라가면 됩니다.
+[config.py](config.py)에서 주요 경로와 기본값을 관리합니다.
 
-1. `config.py`에서 경로 및 가중치 파일 위치 확인
-2. Docker / Docker Compose 준비
-3. Docker 이미지 빌드
-4. `extract` 실행
-5. `segment` 실행
-6. `gui` 실행
-7. `export` 실행
-8. `build` 실행
+환경 변수로 override 가능한 값:
 
----
+- `ANNOTATION_PROJECT_ROOT`
+- `ANNOTATION_WORKSPACE`
+- `ANNOTATION_WEIGHTS_DIR`
+- `ANNOTATION_WEB_HOST`
+- `ANNOTATION_WEB_PORT`
 
-## 7. 참고 사항
+주요 기본값:
 
-- 컨테이너는 현재 디렉터리를 `/app`에 마운트하므로, 호스트에서 수정한 `config.py`, 데이터, 가중치가 그대로 반영됩니다.
-- GPU가 없는 환경에서는 `docker-compose.yml`의 GPU 관련 설정을 제거하거나 CPU 전용 이미지로 빌드해야 합니다.
-- 문제가 발생하면 우선 `config.py`의 경로 설정과 `weights/` 파일 존재 여부를 먼저 확인하는 것이 좋습니다.
+- `WORKSPACE_ROOT`: `create/`
+- `INPUT_IMAGES_DIR`: `create/input/images/`
+- `OUTPUT1_DIR`: `create/output_1/`
+- `OUTPUT2_DIR`: `create/output_2/`
+- `DATASET_DIR`: `create/dataset/`
+- `TRAINING_DIR`: `create/training/`
+- `WEB_PORT`: `7860`
+
+## 현재 코드 기준 참고사항
+
+- `run.py`가 지원하는 명령은 `segment`, `gui`, `export`, `build`, `train`, `clean`, `count`, `fix-names`, `trim`입니다.
+- `pipeline/bag_extract.py` 파일은 남아 있지만 현재 `run.py`에 `extract` 명령으로 연결되어 있지 않습니다.
+- 현재 `config.py`에는 `BAG_DIR`, `INPUT_RGBD_DIR`, `DATASET_RGBD` 설정이 없습니다. 따라서 RealSense `.bag` 추출 흐름은 바로 실행 가능한 기본 파이프라인으로 보지 않는 것이 안전합니다.
+- `export` 명령에는 `--mode copy/move` 옵션이 없습니다. 현재 구현은 copy 방식입니다.
+- `build` 명령에도 `--mode` 옵션이 없습니다. 현재 구현은 copy 방식입니다.
+- GUI는 SAM checkpoint를 시작 시 로드하므로 `weights/sam_vit_b_01ec64.pth`가 없으면 GUI의 SAM 기능 또는 앱 시작이 실패할 수 있습니다.

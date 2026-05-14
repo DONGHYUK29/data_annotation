@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -62,6 +63,7 @@ PIPELINE_DIRS = {
 
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict] = {}
+JOB_PROCS: dict[str, subprocess.Popen] = {}
 
 
 def read_img_safe(path: str | Path, flags=cv2.IMREAD_COLOR):
@@ -98,6 +100,8 @@ def ensure_output_dirs() -> None:
 
 def _run_job(job_id: str, cmd: list[str]) -> None:
     with JOBS_LOCK:
+        if JOBS[job_id]["status"] == "stopped":
+            return
         JOBS[job_id]["status"] = "running"
         JOBS[job_id]["output"] = ""
 
@@ -110,7 +114,11 @@ def _run_job(job_id: str, cmd: list[str]) -> None:
             text=True,
             shell=True,
             bufsize=1,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+            start_new_session=os.name != "nt",
         )
+        with JOBS_LOCK:
+            JOB_PROCS[job_id] = proc
 
         full_output = []
 
@@ -129,17 +137,50 @@ def _run_job(job_id: str, cmd: list[str]) -> None:
         return_code = proc.wait()
 
         with JOBS_LOCK:
-            JOBS[job_id]["status"] = (
+            was_stopping = JOBS[job_id]["status"] in ("stopping", "stopped")
+            JOBS[job_id]["status"] = "stopped" if was_stopping else (
                 "done" if return_code == 0 else "failed"
             )
             JOBS[job_id]["returncode"] = return_code
             JOBS[job_id]["output"] = "".join(full_output)
+            JOB_PROCS.pop(job_id, None)
 
     except Exception as exc:
         with JOBS_LOCK:
             JOBS[job_id]["status"] = "failed"
             JOBS[job_id]["returncode"] = -1
             JOBS[job_id]["output"] = str(exc)
+            JOB_PROCS.pop(job_id, None)
+
+
+def _stop_job_process(job_id: str) -> bool:
+    with JOBS_LOCK:
+        proc = JOB_PROCS.get(job_id)
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job["status"] not in ("queued", "running", "stopping"):
+            return False
+        job["status"] = "stopping"
+
+    if not proc or proc.poll() is not None:
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "stopped"
+        return True
+
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        proc.terminate()
+    return True
 
 
 def _build_docker_command(step: str, payload: dict) -> list[str]:
@@ -720,6 +761,12 @@ def api_pipeline_job(job_id: str):
     return job
 
 
+@app.post("/api/pipeline/job/{job_id}/stop")
+def api_pipeline_job_stop(job_id: str):
+    stopped = _stop_job_process(job_id)
+    return {"ok": True, "stopped": stopped}
+
+
 # Web UI
 HTML_PAGE = r"""
 <!doctype html>
@@ -904,6 +951,39 @@ HTML_PAGE = r"""
       cursor: pointer;
     }
     .run-btn:hover { background: #357abd; }
+
+    .train-action-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .train-action-row .run-btn {
+      margin-top: 0;
+      width: auto;
+    }
+    .train-run-btn {
+      flex: 2 1 0;
+    }
+    .train-stop-btn {
+      flex: 1 1 0;
+      background: #9aa3ad;
+    }
+    .train-stop-btn:hover {
+      background: #858f99;
+    }
+    .train-stop-btn.active {
+      background: #e74c3c;
+    }
+    .train-stop-btn.active:hover {
+      background: #c0392b;
+    }
+    .run-btn:disabled {
+      background: #9aa3ad !important;
+      color: #eef1f4;
+      cursor: not-allowed;
+      filter: grayscale(1);
+      opacity: 0.75;
+    }
 
     #pipelineLog {
       width: 100%;
@@ -1368,7 +1448,10 @@ HTML_PAGE = r"""
           <div class="field">
             <label><input type="checkbox" id="trainPretrainedBackboneOnly" /> Pretrained backbone only</label>
           </div>
-          <button class="run-btn" style="background:#3498db;" onclick="runTrain()">▶ 학습 실행</button>
+          <div class="train-action-row">
+            <button id="trainRunBtn" class="run-btn train-run-btn" style="background:#3498db;" onclick="runTrain()">▶ 학습 실행</button>
+            <button id="trainStopBtn" class="run-btn train-stop-btn" onclick="stopTraining()" disabled>■ 학습 중단</button>
+          </div>
         </div>
 
         <!-- 2. Clean -->
@@ -1408,6 +1491,7 @@ let samPoints = [];
 let pipelineConfig = null;
 let activePipelineTab = ""; 
 let currentJobId = null;
+let currentTrainingJobId = null;
 
 const MASK_DRAW_COLOR = "rgba(0,255,0,0.43)";
 const MASK_DRAW_ALPHA_THRESHOLD = 20;
@@ -1429,6 +1513,8 @@ const cursorOverlayEl = document.getElementById("cursorOverlay");
 const pipelineLogEl = document.getElementById("pipelineLog");
 const loadingOverlayEl = document.getElementById("loadingOverlay");
 const loadingTextEl = document.getElementById("loadingText");
+const trainRunBtnEl = document.getElementById("trainRunBtn");
+const trainStopBtnEl = document.getElementById("trainStopBtn");
 
 const stepFolderMap = {
     input: [
@@ -1448,6 +1534,14 @@ const stepFolderMap = {
 
 function setStatus(msg) { statusEl.textContent = msg; }
 function setPipelineLog(msg) { pipelineLogEl.textContent = msg || "No logs"; }
+
+function setTrainingButtonsRunning(isRunning) {
+    if (trainRunBtnEl) trainRunBtnEl.disabled = isRunning;
+    if (trainStopBtnEl) {
+        trainStopBtnEl.disabled = !isRunning;
+        trainStopBtnEl.classList.toggle("active", isRunning);
+    }
+}
 
 function showLoading(msg = "Loading...") {
     loadingTextEl.textContent = msg;
@@ -1484,6 +1578,134 @@ function formatPipelineOutput(raw) {
     }
     return kept.join("\n").trim();
 }
+
+formatPipelineOutput = function(raw) {
+    const ansiPattern = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+    const lines = String(raw || "").replace(/\r/g, "\n").split("\n");
+    const kept = [];
+    let trainProgress = null;
+    let valProgress = null;
+    let yoloProgress = null;
+    let trainProgressIndex = -1;
+    let valProgressIndex = -1;
+    let yoloProgressIndex = -1;
+    let trainHeaderKept = false;
+    let metricsHeaderKept = false;
+    let currentEpoch = "";
+    let currentLosses = {};
+
+    function makeProgressLine(label, percent, done, total, suffix = "") {
+        const barLen = 24;
+        const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+        const fill = Math.max(0, Math.min(barLen, Math.round((safePercent / 100) * barLen)));
+        const bar = "#".repeat(fill) + "-".repeat(barLen - fill);
+        const count = done && total ? ` (${done}/${total})` : "";
+        return `${label}: [${bar}] ${safePercent}%${count}${suffix ? " " + suffix.trim() : ""}`;
+    }
+
+    function makeMetricsRow(values) {
+        const widths = [6, 9, 9, 9, 9, 11];
+        const align = (value, width, left = false) => {
+            const text = String(value || "");
+            return left ? text.padEnd(width, " ") : text.padStart(width, " ");
+        };
+        return [
+            align(values[0], widths[0]),
+            align(values[1], widths[1]),
+            align(values[2], widths[2]),
+            align(values[3], widths[3]),
+            align(values[4], widths[4]),
+            align(values[5], widths[5]),
+        ].join(" ");
+    }
+
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        const cleanLine = line.replace(ansiPattern, "").trimEnd();
+        if (!cleanLine.trim()) {
+            continue;
+        }
+
+        if (/^\s*Epoch\s+GPU_mem\s+box_loss\s+seg_loss\s+cls_loss\s+dfl_loss\s+sem_loss\s+Instances\s+Size\s*$/.test(cleanLine)) {
+            trainHeaderKept = true;
+            continue;
+        }
+
+        const trainMatch = cleanLine.match(/^\s*(\d+)\/(\d+).*?:\s*(\d+)%\s+.*?\s(\d+)\/(\d+)\s*(.*)$/);
+        if (trainMatch) {
+            currentEpoch = trainMatch[1];
+            const beforeProgress = cleanLine.split(":")[0].trim().split(/\s+/);
+            if (beforeProgress.length >= 7) {
+                currentLosses = {
+                    seg: beforeProgress[3],
+                    cls: beforeProgress[4],
+                    sem: beforeProgress[6],
+                };
+            }
+            trainProgress = makeProgressLine(
+                `Train epoch ${trainMatch[1]}/${trainMatch[2]}`,
+                trainMatch[3],
+                trainMatch[4],
+                trainMatch[5],
+                trainMatch[6]
+            );
+            trainProgressIndex = i;
+            continue;
+        }
+
+        const valMatch = cleanLine.match(/^\s*Class\s+Images\s+Instances.*?:\s*(\d+)%\s+.*?\s(\d+)\/(\d+)\s*(.*)$/);
+        if (valMatch) {
+            valProgress = makeProgressLine("Validation", valMatch[1], valMatch[2], valMatch[3], valMatch[4]);
+            valProgressIndex = i;
+            continue;
+        }
+
+        const yoloBatchMatch = cleanLine.match(/^YOLO batches:\s*(\d+)%\|.*?\|\s*(\d+)\/(\d+)\s*(.*)$/);
+        if (yoloBatchMatch) {
+            yoloProgress = makeProgressLine(
+                "YOLO batches",
+                yoloBatchMatch[1],
+                yoloBatchMatch[2],
+                yoloBatchMatch[3],
+                yoloBatchMatch[4]
+            );
+            yoloProgressIndex = i;
+            continue;
+        }
+
+        if (/^\s*Class\s+Images\s+Instances\s+Box\(P\s+R\s+mAP50\s+mAP50-95\)\s+Mask\(P\s+R\s+mAP50\s+mAP50-95\)\s*$/.test(cleanLine)) {
+            continue;
+        }
+
+        if (/^\s*all\s+/.test(cleanLine)) {
+            const parts = cleanLine.trim().split(/\s+/);
+            if (!metricsHeaderKept) {
+                kept.push(makeMetricsRow(["epoch", "seg_loss", "cls_loss", "sem_loss", "mask_m50", "mask_m50-95"]));
+                metricsHeaderKept = true;
+            }
+            kept.push(makeMetricsRow([
+                currentEpoch || "-",
+                currentLosses.seg || "-",
+                currentLosses.cls || "-",
+                currentLosses.sem || "-",
+                parts[9] || "-",
+                parts[10] || "-",
+            ]));
+            continue;
+        }
+
+        kept.push(cleanLine.trimEnd().replace(/\s{2,}/g, " "));
+    }
+
+    while (kept.length && kept[kept.length - 1] === "") kept.pop();
+    if (trainProgressIndex > valProgressIndex) valProgress = null;
+    if (trainProgress) kept.push(trainProgress);
+    if (valProgress) kept.push(valProgress);
+    if (yoloProgress && yoloProgressIndex > trainProgressIndex && yoloProgressIndex > valProgressIndex) {
+        kept.push(yoloProgress);
+    }
+    return kept.join("\n").trim();
+};
 
 async function checkInputStatus() {
     try {
@@ -1790,6 +2012,9 @@ async function pollJob(jobId) {
     if (data.status === "done") {
       setStatus(`Pipeline ${data.step}: ${data.status}`);
       return true;
+    } else if (data.status === "stopped") {
+      setStatus(`Pipeline ${data.step}: stopped`);
+      return false;
     } else if (data.status === "failed") {
       setStatus(`Pipeline ${data.step}: ${data.status}`);
       return false;
@@ -1930,7 +2155,16 @@ async function runTrain() {
         });
         const trainData = await trainRes.json();
         if (!trainRes.ok) throw new Error(trainData.detail);
-        const ok = await pollJob(trainData.job_id);
+        const trainJobId = trainData.job_id;
+        currentJobId = trainJobId;
+        currentTrainingJobId = trainJobId;
+        setTrainingButtonsRunning(true);
+        setPipelineLog(`[queued] ${trainData.command}`);
+        const ok = await pollJob(trainJobId);
+        if (currentTrainingJobId === trainJobId) {
+            currentTrainingJobId = null;
+            setTrainingButtonsRunning(false);
+        }
 
         if (ok) {
             await loadWeightsList();
@@ -1941,7 +2175,32 @@ async function runTrain() {
             setStatus("Training completed. Weights list refreshed.");
         }
     } catch(e) {
+        setTrainingButtonsRunning(false);
+        currentTrainingJobId = null;
         setStatus("Train failed");
+        alert(e);
+    }
+}
+
+async function stopTraining() {
+    if (!currentTrainingJobId) {
+        alert("중단할 학습 작업이 없습니다.");
+        return;
+    }
+    setStatus("Stopping training...");
+    try {
+        const res = await fetch(`/api/pipeline/job/${encodeURIComponent(currentTrainingJobId)}/stop`, {
+            method: "POST"
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to stop training");
+        setStatus(data.stopped ? "Training stop requested." : "No running training job.");
+        if (!data.stopped) {
+            currentTrainingJobId = null;
+            setTrainingButtonsRunning(false);
+        }
+    } catch (e) {
+        setStatus("Failed to stop training");
         alert(e);
     }
 }
