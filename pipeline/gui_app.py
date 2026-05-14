@@ -939,6 +939,45 @@ HTML_PAGE = r"""
       flex: 1;
     }
 
+    .field label.checkbox-option {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      height: 36px;
+      width: 100%;
+      padding: 8px 10px;
+      box-sizing: border-box;
+      border: 1px solid #d9dee5;
+      border-radius: 4px;
+      background: #fff;
+      color: #344054;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .field label.checkbox-option input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      padding: 0;
+      flex: 0 0 auto;
+    }
+    .checkbox-field label:first-child {
+      visibility: visible;
+    }
+    .field:has(#trainResumeBool),
+    .field:has(#trainPretrainedBackboneOnly) {
+      display: none;
+    }
+    .resume-option-row .field:first-child {
+      flex: 2 1 0;
+    }
+    .resume-option-row .checkbox-field,
+    .resume-option-row .field:last-child {
+      flex: 1 1 0;
+    }
+
     .run-btn {
       width: 100%;
       margin-top: 10px;
@@ -1363,7 +1402,7 @@ HTML_PAGE = r"""
           <div class="field-row">
               <div class="field">
                 <label>Epoch</label>
-                <input id="trainEpochs" type="number" value="100" min="1" />
+                <input id="trainEpochs" type="number" value="50" min="1" />
               </div>
               <div class="field">
                 <label>Batch size</label>
@@ -1410,6 +1449,14 @@ HTML_PAGE = r"""
           </div>
           <div class="field-row">
             <div class="field"><label>Resume</label><input id="trainResumePath" type="text" placeholder="체크포인트 경로 또는 비움" /></div>
+            <div class="field checkbox-field">
+              <label>Resume auto</label>
+              <label class="checkbox-option"><input type="checkbox" id="trainResumeAutoProxy" /></label>
+            </div>
+            <div class="field checkbox-field">
+              <label>Pretrained backbone</label>
+              <label class="checkbox-option"><input type="checkbox" id="trainPretrainedBackboneOnlyProxy" /></label>
+            </div>
             <div class="field">
               <label>Cache</label>
               <select id="trainCache">
@@ -2762,8 +2809,45 @@ window.addEventListener("resize", () => {
   }
 });
 
+function setupTrainingOptionProxies() {
+  const resumePath = document.getElementById("trainResumePath");
+  if (resumePath) {
+    const label = resumePath.closest(".field")?.querySelector("label");
+    if (label) label.textContent = "Resume checkpoint";
+    resumePath.placeholder = "체크포인트 경로 또는 비움";
+    resumePath.closest(".field-row")?.classList.add("resume-option-row");
+  }
+
+  const pretrainProxy = document.getElementById("trainPretrainedBackboneOnlyProxy");
+  const ampSelect = document.getElementById("trainAmp");
+  const hiddenResume = document.getElementById("trainResumeBool");
+  if (pretrainProxy && ampSelect) {
+    const pretrainField = pretrainProxy.closest(".field");
+    const runtimeRow = ampSelect.closest(".field-row");
+    const hiddenResumeField = hiddenResume?.closest(".field");
+    if (pretrainField && runtimeRow) {
+      runtimeRow.insertBefore(pretrainField, hiddenResumeField || null);
+    }
+  }
+
+  const pairs = [
+    ["trainResumeAutoProxy", "trainResumeBool"],
+    ["trainPretrainedBackboneOnlyProxy", "trainPretrainedBackboneOnly"],
+  ];
+  pairs.forEach(([proxyId, realId]) => {
+    const proxy = document.getElementById(proxyId);
+    const real = document.getElementById(realId);
+    if (!proxy || !real) return;
+    proxy.checked = real.checked;
+    proxy.addEventListener("change", () => {
+      real.checked = proxy.checked;
+    });
+  });
+}
+
 async function initApp() {
   try {
+    setupTrainingOptionProxies();
     await loadPipelineConfig();
     await loadWeightsList(); // 학습용 가중치 모델 목록 로드
     await loadSegmentWeights(); // 세그먼트용 .pt 목록 로드
