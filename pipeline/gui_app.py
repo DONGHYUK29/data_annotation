@@ -292,6 +292,39 @@ def stem_to_class_id(stem: str) -> int:
     return 0
 
 
+def read_class_id_from_label(label_path: Path) -> int | None:
+    try:
+        with open(label_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                return int(parts[0])
+    except Exception:
+        return None
+    return None
+
+
+def get_label_path_to_load(stem: str) -> Path | None:
+    edited_label = AFTER_LABEL_DIR / f"{stem}.txt"
+    base_label = LABEL_DIR / f"{stem}.txt"
+
+    if edited_label.exists():
+        return edited_label
+    if base_label.exists():
+        return base_label
+    return None
+
+
+def resolve_class_id(stem: str) -> int:
+    label_path = get_label_path_to_load(stem)
+    if label_path is not None:
+        class_id = read_class_id_from_label(label_path)
+        if class_id is not None:
+            return class_id
+    return stem_to_class_id(stem)
+
+
 def mask_to_bbox_and_polygon(mask_u8: np.ndarray):
     m = (mask_u8 > 127).astype(np.uint8)
     ys, xs = np.where(m > 0)
@@ -536,7 +569,7 @@ def api_meta(stem: str):
         "stem": stem,
         "width": w,
         "height": h,
-        "class_id": stem_to_class_id(stem),
+        "class_id": resolve_class_id(stem),
     }
 
 
@@ -636,7 +669,7 @@ async def api_save(stem: str, request: Request):
         )
 
     bbox, poly = mask_to_bbox_and_polygon(mask)
-    class_id = stem_to_class_id(stem)
+    class_id = resolve_class_id(stem)
 
     if bbox is not None and poly is not None and len(poly) >= 3:
         poly_norm: list[str] = []
@@ -1117,22 +1150,115 @@ HTML_PAGE = r"""
 
     .bottom-bar {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
       border-top: 1px solid #d9dee5;
-      background: #fff;
-      min-height: 64px;
+      background: #ffffff;
+      min-height: 72px;
+      padding: 10px 12px;
+      box-sizing: border-box;
     }
     .bottom-left, .bottom-right {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 10px 12px;
+      gap: 10px;
       box-sizing: border-box;
       min-width: 0;
       flex-wrap: wrap;
     }
-    .bottom-left { border-right: 1px solid #e5e7eb; }
-    .bottom-right { justify-content: space-between; }
+    .bottom-left {
+      justify-content: flex-start;
+    }
+    .bottom-right {
+      justify-content: flex-end;
+      margin-left: auto;
+    }
+
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 10px;
+      border-right: 1px solid #e5e7eb;
+      box-sizing: border-box;
+    }
+    .control-group:first-child {
+      padding-left: 0;
+    }
+    .control-group:last-child {
+      border-right: 0;
+      padding-right: 0;
+    }
+    .control-group label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+      color: #344054;
+      font-size: 14px;
+    }
+    .control-group input[type="range"] {
+      width: 150px;
+      padding: 0;
+    }
+    .control-group button {
+      min-width: 68px;
+      height: 36px;
+      padding: 0 12px;
+      border: 1px solid #b8c0cc;
+      border-radius: 6px;
+      background: #ffffff;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .mode-group button {
+      min-width: 88px;
+    }
+    .history-group button {
+      min-width: 82px;
+    }
+    .nav-group button {
+      min-width: 78px;
+    }
+    .save-group button {
+      min-width: 82px;
+      font-weight: bold;
+    }
+    .info-group {
+      border-right: 0;
+      padding-right: 0;
+    }
+    .status-text {
+      display: block;
+      width: 180px;
+      max-width: 180px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .current-info-wrap {
+      display: block;
+      min-width: 180px;
+      max-width: 280px;
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    @media (max-width: 1200px) {
+      .bottom-bar {
+        grid-template-columns: 1fr;
+      }
+      .bottom-right {
+        justify-content: flex-start;
+        margin-left: 0;
+      }
+      .current-info-wrap {
+        text-align: left;
+      }
+    }
 
     button, select, input[type="range"] {
       padding: 8px 10px;
@@ -1321,22 +1447,34 @@ HTML_PAGE = r"""
       </div>
       <div class="bottom-bar">
         <div class="bottom-left">
-          <button id="brushBtn" class="active" onclick="setMode('brush')">🖌️ Brush</button>
-          <button id="eraseBtn" onclick="setMode('erase')">🧽 Eraser</button>
-          <button id="samPointBtn" onclick="setMode('sam_point')">🎯 SAM Point</button>
-          <label>Brush Size <input type="range" id="brushSize" min="1" max="80" value="10" /></label>
-          <button onclick="undoMask()">Undo</button>
-          <button onclick="clearMask()">Erase All</button>
-          <label>Zoom <input type="range" id="zoomRange" min="10" max="400" value="100" /></label>
-          <span id="status" class="muted">Ready</span>
+          <div class="control-group mode-group">
+            <button id="brushBtn" class="active" onclick="setMode('brush')">🖌️ Brush</button>
+            <button id="eraseBtn" onclick="setMode('erase')">🧽 Eraser</button>
+            <button id="samPointBtn" onclick="setMode('sam_point')">🎯 SAM Point</button>
+          </div>
+          <div class="control-group brush-group">
+            <label>Brush Size <input type="range" id="brushSize" min="1" max="80" value="10" /></label>
+          </div>
+          <div class="control-group history-group">
+            <button onclick="undoMask()">Undo</button>
+            <button onclick="clearMask()">Erase All</button>
+          </div>
+          <div class="control-group zoom-group">
+            <label>Zoom <input type="range" id="zoomRange" min="10" max="400" value="100" /></label>
+            <span id="status" class="muted status-text">Ready</span>
+          </div>
         </div>
         <div class="bottom-right">
-          <div>
+          <div class="control-group nav-group">
             <button onclick="prevImage()">◀ Prev</button>
             <button onclick="nextImage()">Next ▶</button>
+          </div>
+          <div class="control-group save-group">
             <button onclick="saveCurrent()">💾 Save</button>
           </div>
-          <div><span id="currentInfo" class="muted"></span></div>
+          <div class="control-group info-group">
+            <span id="currentInfo" class="muted current-info-wrap"></span>
+          </div>
         </div>
       </div>
     </div>

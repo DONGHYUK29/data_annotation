@@ -25,10 +25,18 @@ def list_images(src_dir: Path) -> list[Path]:
     return sorted(imgs)
 
 
-def parse_group(stem: str):
+def read_class_id_from_label(label_path: Path) -> int:
+    for line in label_path.read_text(encoding="utf-8").splitlines():
+        parts = line.strip().split()
+        if parts:
+            return int(parts[0])
+    raise ValueError(f"Label has no class id: {label_path}")
+
+
+def parse_group(stem: str, label_path: Path):
     parts = stem.split("_")
-    background = parts[0]
-    class_id = int(parts[1])
+    background = parts[0] if len(parts) >= 3 else "default"
+    class_id = read_class_id_from_label(label_path)
     return (background, class_id)
 
 
@@ -82,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
 
     groups: dict[tuple, list] = defaultdict(list)
     for img_path, label_path in samples:
-        key = parse_group(img_path.stem)
+        key = parse_group(img_path.stem, label_path)
         groups[key].append((img_path, label_path))
 
     train_set = []

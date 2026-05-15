@@ -14,10 +14,14 @@ if str(ROOT) not in sys.path:
 import config as cfg
 
 
-def extract_class_id(stem: str):
-    for p in stem.split("_"):
-        if p.isdigit():
-            return int(p)
+def read_class_id_from_label(label_path: Path):
+    try:
+        for line in label_path.read_text(encoding="utf-8").splitlines():
+            parts = line.strip().split()
+            if parts:
+                return int(parts[0])
+    except Exception:
+        return None
     return None
 
 
@@ -29,7 +33,7 @@ def trim_stage_dir(stage_root: Path, keep_per_class: int, seed: int = 42) -> Non
 
     class_map: dict[int, list[str]] = defaultdict(list)
     for f in label_dir.glob("*.txt"):
-        cls = extract_class_id(f.stem)
+        cls = read_class_id_from_label(f)
         if cls is None:
             continue
         class_map[cls].append(f.stem)
@@ -67,7 +71,9 @@ def trim_dataset_stack(dataset_root: Path | None = None, seed: int = 42) -> None
         if len(parts) < 3:
             continue
         bg = parts[0]
-        cls = int(parts[1])
+        cls = read_class_id_from_label(lab_dir / f"{img.stem}.txt")
+        if cls is None:
+            continue
         groups[(bg, cls)].append(img.stem)
 
     total_deleted = 0

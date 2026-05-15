@@ -87,7 +87,7 @@ TRAINING_DIR = WORKSPACE_ROOT / "training"
 TRAINING_DATASET_YAML = TRAINING_DIR / "dataset.yaml"
 
 # --- 모델 가중치 ---
-YOLO_WEIGHT = WEIGHTS_DIR / "yolo26l-seg_finetuned_mix_2000.pt"
+YOLO_WEIGHT = WEIGHTS_DIR / "yolo26l-seg_finetuned.pt"
 SAM_WEIGHT = WEIGHTS_DIR / "sam_vit_b_01ec64.pth"
 SAM_MODEL_TYPE = "vit_b"
 
