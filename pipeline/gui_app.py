@@ -672,16 +672,24 @@ async def api_save(stem: str, request: Request):
     class_id = resolve_class_id(stem)
 
     if bbox is not None and poly is not None and len(poly) >= 3:
-        poly_norm: list[str] = []
+        poly_norm_values: list[float] = []
         for px, py in poly:
             xn = px / max(w - 1, 1)
             yn = py / max(h - 1, 1)
-            poly_norm.append(f"{xn:.6f}")
-            poly_norm.append(f"{yn:.6f}")
+            poly_norm_values.append(float(xn))
+            poly_norm_values.append(float(yn))
 
-        # 기존에는 BBox(xc, yc, w, h)를 저장했으나, 
-        # YOLO Segmentation 모델 호환성을 위해 BBox 제외하고 폴리곤 좌표만 기록합니다.
-        line = str(class_id) + " " + " ".join(poly_norm)
+        xs = poly_norm_values[0::2]
+        ys = poly_norm_values[1::2]
+        bbox_norm = [
+            (min(xs) + max(xs)) / 2,
+            (min(ys) + max(ys)) / 2,
+            max(xs) - min(xs),
+            max(ys) - min(ys),
+        ]
+
+        values = [*bbox_norm, *poly_norm_values]
+        line = str(class_id) + "".join(f" {v:.6f}" for v in values)
 
         label_save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(label_save_path, "w", encoding="utf-8") as f:
@@ -1164,14 +1172,16 @@ HTML_PAGE = r"""
       gap: 10px;
       box-sizing: border-box;
       min-width: 0;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
     }
     .bottom-left {
       justify-content: flex-start;
+      overflow: hidden;
     }
     .bottom-right {
       justify-content: flex-end;
       margin-left: auto;
+      flex-shrink: 0;
     }
 
     .control-group {
@@ -1182,6 +1192,7 @@ HTML_PAGE = r"""
       padding: 0 10px;
       border-right: 1px solid #e5e7eb;
       box-sizing: border-box;
+      flex-shrink: 0;
     }
     .control-group:first-child {
       padding-left: 0;
@@ -1231,16 +1242,17 @@ HTML_PAGE = r"""
     }
     .status-text {
       display: block;
-      width: 180px;
-      max-width: 180px;
+      width: 110px;
+      max-width: 110px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .current-info-wrap {
       display: block;
-      min-width: 180px;
-      max-width: 280px;
+      width: 190px;
+      min-width: 0;
+      max-width: 190px;
       text-align: right;
       white-space: nowrap;
       overflow: hidden;

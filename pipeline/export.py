@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config as cfg
+from pipeline.label_utils import normalize_label_text
 
 
 def clean_filename(name: str) -> str:
@@ -82,7 +83,10 @@ def main(argv: list[str] | None = None) -> None:
         shutil.copy2(mask_path, mask_dst)
 
         if label_src.exists():
-            shutil.copy2(label_src, label_dst)
+            label_dst.write_text(
+                normalize_label_text(label_src.read_text(encoding="utf-8")),
+                encoding="utf-8",
+            )
         else:
             print("Missing label:", label_src)
 
