@@ -1686,12 +1686,12 @@ HTML_PAGE = r"""
           <div class="field">
             <label>삭제 대상</label>
             <select id="cleanMode">
-              <option value="all">all</option>
-              <option value="dataset">dataset</option>
-              <option value="input">input</option>
-              <option value="output1">output1</option>
-              <option value="output2">output2</option>
-              <option value="training">training</option>
+              <option value="all">all - 전체 작업 폴더 초기화</option>
+              <option value="input">input - 업로드한 입력 이미지 삭제</option>
+              <option value="output1">output1 - 자동 세그멘테이션 결과 삭제</option>
+              <option value="output2">output2 - GUI 수정 결과 삭제</option>
+              <option value="dataset">dataset - 최종 생성 Dataset 삭제</option>
+              <option value="training">training - 학습 결과 및 가중치 삭제</option>
             </select>
           </div>
           <button class="run-btn" style="background:#e74c3c;" onclick="runClean()">🗑️ 선택 폴더 초기화</button>
@@ -1952,7 +1952,9 @@ async function checkInputStatus() {
 async function uploadInputFiles(fileList) {
     if (!fileList || fileList.length === 0) return;
     const fd = new FormData();
-    for (const f of fileList) fd.append("files", f);
+    const files = prepareInputFilesForUpload(fileList);
+    if (!files) return;
+    for (const f of files) fd.append("files", f, f.name);
     setStatus("Uploading input files...");
     try {
         const res = await fetch("/api/input/upload", { method: "POST", body: fd });
@@ -1964,6 +1966,72 @@ async function uploadInputFiles(fileList) {
         setStatus("Upload failed");
         alert(String(e));
     }
+}
+
+function splitFileName(name) {
+    const dot = name.lastIndexOf(".");
+    if (dot <= 0) return { stem: name, ext: "" };
+    return { stem: name.slice(0, dot), ext: name.slice(dot) };
+}
+
+function startsWithClassNumber(name) {
+    const { stem } = splitFileName(name);
+    const first = stem.split("_")[0];
+    return /^\d+$/.test(first);
+}
+
+function defaultClassNumberFromName(name) {
+    const { stem } = splitFileName(name);
+    const match = stem.match(/^class_(\d+)(?:_|$)/i);
+    return match ? match[1] : "";
+}
+
+function buildClassNumberedName(name, classNumber) {
+    const { stem, ext } = splitFileName(name);
+    const classPrefix = new RegExp(`^class_${classNumber}_?`, "i");
+    const cleanStem = stem.replace(classPrefix, "") || "image";
+    return `${classNumber}_${cleanStem}${ext}`;
+}
+
+function promptClassNumberForUpload(files) {
+    const firstFile = files[0];
+    const defaultValue = defaultClassNumberFromName(firstFile.name);
+    const message = `${files.length}개 파일의 파일명이 클래스 번호로 시작하지 않습니다.\n전체에 적용할 class_number를 입력하세요.\n첫 파일: ${firstFile.name}`;
+    while (true) {
+        const value = prompt(message, defaultValue);
+        if (value === null) return null;
+        const trimmed = value.trim();
+        if (/^\d+$/.test(trimmed)) return trimmed;
+        alert("class_number는 0 이상의 정수로 입력하세요.");
+    }
+}
+
+function prepareInputFilesForUpload(fileList) {
+    const sourceFiles = Array.from(fileList);
+    const needsClassNumber = sourceFiles.filter(file => !startsWithClassNumber(file.name));
+    let classNumber = null;
+    if (needsClassNumber.length > 0) {
+        classNumber = promptClassNumberForUpload(needsClassNumber);
+        if (classNumber === null) {
+            setStatus("Upload cancelled");
+            return null;
+        }
+    }
+
+    const prepared = [];
+    for (const file of sourceFiles) {
+        if (startsWithClassNumber(file.name)) {
+            prepared.push(file);
+            continue;
+        }
+
+        const newName = buildClassNumberedName(file.name, classNumber);
+        prepared.push(new File([file], newName, {
+            type: file.type,
+            lastModified: file.lastModified,
+        }));
+    }
+    return prepared;
 }
 
 async function loadWeightsList() {
