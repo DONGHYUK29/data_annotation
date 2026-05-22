@@ -36,7 +36,7 @@ def get_class_id_from_stem(stem: str) -> int:
 
 def resolve_yolo_weight(weights_arg: str | None) -> Path:
     """
-    GUI/CLI에서 전달된 weights 값을 실제 .pt 경로로 변환한다.
+    Edit/CLI에서 전달된 weights 값을 실제 .pt 경로로 변환한다.
     - 빈 값이면 config.py의 cfg.YOLO_WEIGHT 사용
     - 상대 경로이면 cfg.WEIGHTS_DIR 하위로 해석
     - 절대 경로/상대 경로 모두 최종적으로 cfg.WEIGHTS_DIR 내부 .pt만 허용

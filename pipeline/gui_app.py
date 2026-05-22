@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=print_notice, daemon=True).start()
     yield
 
-app = FastAPI(title="Annotation Web GUI + SAM Point Assist", lifespan=lifespan)
+app = FastAPI(title="Annotation Web Edit + SAM Point Assist", lifespan=lifespan)
 
 MASK_ALPHA = 110
 MASK_RGBA = (0, 255, 0, MASK_ALPHA)
@@ -187,7 +187,8 @@ def _build_docker_command(step: str, payload: dict) -> list[str]:
     base = ["docker", "compose", "run", "--rm"]
     if step == "gui":
         base.append("--service-ports")
-    cmd = ["python", "run.py", step]
+    cmd_step = "edit" if step == "gui" else step
+    cmd = ["python", "run.py", cmd_step]
 
     if step == "segment":
         if payload.get("input_dir"):
@@ -843,7 +844,7 @@ HTML_PAGE = r"""
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>Annotation Web GUI + SAM Point Assist</title>
+  <title>Annotation Web Edit + SAM Point Assist</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -1501,12 +1502,12 @@ HTML_PAGE = r"""
   </main>
 
   <aside class="pipeline-panel">
-    <h3 style="margin-top: 0;">Editor</h3>
+    <h3 style="margin-top: 0; color: #1c5b9e;">Pipeline</h3>
     
     <div class="right-tabs">
       <button onclick="switchPipelineTab('input')" id="tabBtn_input">Input</button>
       <button onclick="switchPipelineTab('segment')" id="tabBtn_segment">Segment</button>
-      <button onclick="switchPipelineTab('gui')" id="tabBtn_gui">GUI</button>
+      <button onclick="switchPipelineTab('gui')" id="tabBtn_gui">Edit</button>
       <button onclick="switchPipelineTab('export')" id="tabBtn_export">Export</button>
     </div>
     
@@ -1551,7 +1552,7 @@ HTML_PAGE = r"""
     <div id="pipelineLog">Waiting...</div>
     
     <div class="extra-tools" style="margin-top: 24px; border-top: 1px solid #d9dee5; padding-top: 16px;">
-      <h3 style="margin-top: 0; color: #1c5b9e;">🛠️ 추가 유틸리티</h3>
+      <h3 style="margin-top: 0; color: #1c5b9e;">🛠️ Utility</h3>
       
       <div class="right-tabs">
         <button onclick="switchExtraTab('train')" id="extraBtn_train">Training</button>
@@ -1689,7 +1690,7 @@ HTML_PAGE = r"""
               <option value="all">all - 전체 작업 폴더 초기화</option>
               <option value="input">input - 업로드한 입력 이미지 삭제</option>
               <option value="output1">output1 - 자동 세그멘테이션 결과 삭제</option>
-              <option value="output2">output2 - GUI 수정 결과 삭제</option>
+              <option value="output2">output2 - Edit 수정 결과 삭제</option>
               <option value="dataset">dataset - 최종 생성 Dataset 삭제</option>
               <option value="training">training - 학습 결과 및 가중치 삭제</option>
             </select>
@@ -2252,7 +2253,7 @@ async function switchPipelineTab(step) {
 
         if (pendingMoveCount > 0 || isDirty) {
             const msg = [
-            "GUI 편집 화면을 벗어나기 전에 확인이 필요합니다.",
+            "Edit 화면을 벗어나기 전에 확인이 필요합니다.",
             "",
             "확인: 편집 안 한 이미지를 output_2로 자동 복사한 뒤 이동",
             "취소: 복사하지 않고 바로 다음 탭으로 이동",

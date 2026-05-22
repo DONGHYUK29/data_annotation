@@ -50,7 +50,7 @@ WEIGHTS_DIR = _path_from_env(
     PROJECT_ROOT / "weights",
 )
 
-# --- Web GUI 설정 ---
+# --- Web Edit 설정 ---
 WEB_HOST = _str_from_env("ANNOTATION_WEB_HOST", "0.0.0.0")
 WEB_PORT = _int_from_env("ANNOTATION_WEB_PORT", 7860)
 
@@ -69,7 +69,7 @@ OUTPUT1_MASKS = OUTPUT1_DIR / "masks"
 OUTPUT1_LABELS = OUTPUT1_DIR / "labels"
 OUTPUT1_IMAGES = OUTPUT1_DIR / "images"
 
-# Web GUI 정제 결과 (최종 라벨)
+# Web Edit 정제 결과 (최종 라벨)
 OUTPUT2_DIR = WORKSPACE_ROOT / "output_2"
 OUTPUT2_IMAGES = OUTPUT2_DIR / "images"
 OUTPUT2_MASKS = OUTPUT2_DIR / "masks"

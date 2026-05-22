@@ -2,7 +2,7 @@
 통합 진입점. 프로젝트 루트에서 실행하세요.
 
   python run.py segment [--input DIR] [--output DIR]
-  python run.py gui [--host 0.0.0.0] [--port 7860]
+  python run.py edit [--host 0.0.0.0] [--port 7860]
   python run.py export --bg paper
   python run.py build --num-classes 10 [--val-ratio 0.1]
   python run.py train --weights yolo26l-seg.yaml --name exp1 --epochs 100 --batch 16 --imgsz 640 [...]
@@ -29,20 +29,20 @@ if str(ROOT) not in sys.path:
 HELP = __doc__ or ""
 
 
-def run_web_gui(argv: list[str]) -> None:
+def run_web_edit(argv: list[str]) -> None:
     try:
         import uvicorn
         import config as cfg
 
-        parser = argparse.ArgumentParser(prog="python run.py gui")
-        parser.add_argument("--host", default=cfg.WEB_HOST, help="Web GUI host")
-        parser.add_argument("--port", type=int, default=cfg.WEB_PORT, help="Web GUI port")
+        parser = argparse.ArgumentParser(prog="python run.py edit")
+        parser.add_argument("--host", default=cfg.WEB_HOST, help="Web Edit host")
+        parser.add_argument("--port", type=int, default=cfg.WEB_PORT, help="Web Edit port")
         args = parser.parse_args(argv)
 
         uvicorn.run("pipeline.gui_app:app", host=args.host, port=args.port, reload=False)
     except ModuleNotFoundError:
         cmd = ["docker", "compose", "up", "annotation"]
-        print("로컬 의존성이 없어 Docker로 GUI를 실행합니다:", " ".join(cmd))
+        print("로컬 의존성이 없어 Docker로 Edit를 실행합니다:", " ".join(cmd))
         subprocess.run(cmd, cwd=str(ROOT), check=False)
 
 
@@ -126,11 +126,11 @@ def run_train(args: argparse.Namespace) -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        run_web_gui([])
+        run_web_edit([])
         return
 
     if sys.argv[1] in ("-h", "--help", "help"):
-        print(HELP.strip() + "\n\n(인자 없이 실행하면 GUI가 바로 시작됩니다.)")
+        print(HELP.strip() + "\n\n(인자 없이 실행하면 Edit가 바로 시작됩니다.)")
         return
 
     cmd = sys.argv[1]
@@ -141,8 +141,8 @@ def main() -> None:
 
         run_cmd(rest)
 
-    elif cmd == "gui":
-        run_web_gui(rest)
+    elif cmd in ("edit", "gui"):
+        run_web_edit(rest)
 
     elif cmd == "export":
         from pipeline.export import main as run_cmd

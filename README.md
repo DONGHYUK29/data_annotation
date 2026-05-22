@@ -7,16 +7,16 @@ YOLO segmentation 데이터셋을 만들고 학습까지 이어가기 위한 로
 ```text
 입력 이미지 업로드/배치
   -> YOLO-seg 1차 자동 마스크 생성
-  -> Web GUI에서 브러시/지우개/SAM point로 마스크 보정
+  -> Web Edit에서 브러시/지우개/SAM point로 마스크 보정
   -> dataset/으로 export
   -> train/val split 및 YOLO 학습
 ```
 
 ## 주요 기능
 
-- 이미지 입력: `create/input/images/`에 PNG/JPG/JPEG/BMP 파일 배치 또는 Web GUI 업로드
+- 이미지 입력: `create/input/images/`에 PNG/JPG/JPEG/BMP 파일 배치 또는 Web Edit 업로드
 - 자동 세그멘테이션: Ultralytics YOLO-seg 모델로 1차 마스크 생성
-- 수동 보정 GUI: 브러시, 지우개, undo, SAM point assist 지원
+- 수동 Edit: 브러시, 지우개, undo, SAM point assist 지원
 - 결과 복사: 보정하지 않은 샘플도 `output_2`로 일괄 복사 가능
 - 데이터셋 export: `create/output_2` 결과를 `create/dataset`으로 통합
 - 학습 준비: `create/dataset`을 train/val로 나누고 `dataset.yaml` 생성
@@ -87,7 +87,7 @@ python run.py fix-names
 
 ## Docker 실행
 
-이 프로젝트는 Docker Compose 기준으로 바로 Web GUI가 뜨도록 구성되어 있습니다. GPU 사용을 전제로 `docker-compose.yml`에 `gpus: all`이 설정되어 있습니다.
+이 프로젝트는 Docker Compose 기준으로 바로 Web Edit가 뜨도록 구성되어 있습니다. GPU 사용을 전제로 `docker-compose.yml`에 `gpus: all`이 설정되어 있습니다.
 
 ```bash
 docker compose build
@@ -106,23 +106,23 @@ http://localhost:7860
 docker compose run --rm annotation python run.py segment
 ```
 
-GUI처럼 포트를 열어야 하는 명령은 다음처럼 실행합니다.
+Edit처럼 포트를 열어야 하는 명령은 다음처럼 실행합니다.
 
 ```bash
-docker compose run --rm --service-ports annotation python run.py gui --host 0.0.0.0 --port 7860
+docker compose run --rm --service-ports annotation python run.py edit --host 0.0.0.0 --port 7860
 ```
 
 ## 로컬 실행
 
 로컬 Python 환경에서 실행하려면 `requirements-docker.txt`의 패키지가 필요합니다. CUDA, PyTorch, `segment-anything`, Ultralytics 환경이 맞아야 하므로 보통은 Docker 실행을 권장합니다.
 
-GUI 실행:
+Edit 실행:
 
 ```bash
-python run.py gui
+python run.py edit
 ```
 
-인자 없이 `python run.py`만 실행해도 GUI가 시작됩니다.
+인자 없이 `python run.py`만 실행해도 Edit가 시작됩니다.
 
 ## 파이프라인 명령
 
@@ -134,7 +134,7 @@ python run.py gui
 create/input/images/
 ```
 
-또는 Web GUI의 input 탭에서 업로드할 수 있습니다.
+또는 Web Edit의 input 탭에서 업로드할 수 있습니다.
 
 ### 2. 1차 자동 마스크 생성
 
@@ -156,13 +156,13 @@ python run.py segment --input create/input/images --output create/output_1 --wei
 
 참고: `--weights`는 `weights/` 안의 `.pt` 파일만 허용합니다.
 
-### 3. GUI 보정
+### 3. Edit 보정
 
 ```bash
-python run.py gui --host 0.0.0.0 --port 7860
+python run.py edit --host 0.0.0.0 --port 7860
 ```
 
-GUI는 다음 데이터를 사용합니다.
+Edit는 다음 데이터를 사용합니다.
 
 - 원본 이미지: `create/input/images/`
 - 초기 마스크: `create/output_1/masks/`
@@ -175,7 +175,7 @@ GUI는 다음 데이터를 사용합니다.
 - 마스크: `create/output_2/masks/{stem}_edited.png`
 - 라벨: `create/output_2/labels/{stem}.txt`
 
-GUI의 remaining copy 기능은 아직 보정하지 않은 샘플을 `output_1`에서 `output_2`로 복사합니다.
+Edit의 remaining copy 기능은 아직 보정하지 않은 샘플을 `output_1`에서 `output_2`로 복사합니다.
 
 ### 4. Dataset export
 
@@ -308,9 +308,9 @@ python run.py trim dataset
 
 ## 현재 코드 기준 참고사항
 
-- `run.py`가 지원하는 명령은 `segment`, `gui`, `export`, `build`, `train`, `clean`, `count`, `fix-names`, `trim`입니다.
+- `run.py`가 지원하는 명령은 `segment`, `edit`, `gui`, `export`, `build`, `train`, `clean`, `count`, `fix-names`, `trim`입니다. `gui`는 기존 호환용 별칭입니다.
 - `pipeline/bag_extract.py` 파일은 남아 있지만 현재 `run.py`에 `extract` 명령으로 연결되어 있지 않습니다.
 - 현재 `config.py`에는 `BAG_DIR`, `INPUT_RGBD_DIR`, `DATASET_RGBD` 설정이 없습니다. 따라서 RealSense `.bag` 추출 흐름은 바로 실행 가능한 기본 파이프라인으로 보지 않는 것이 안전합니다.
 - `export` 명령에는 `--mode copy/move` 옵션이 없습니다. 현재 구현은 copy 방식입니다.
 - `build` 명령에도 `--mode` 옵션이 없습니다. 현재 구현은 copy 방식입니다.
-- GUI는 SAM checkpoint를 시작 시 로드하므로 `weights/sam_vit_b_01ec64.pth`가 없으면 GUI의 SAM 기능 또는 앱 시작이 실패할 수 있습니다.
+- Edit는 SAM checkpoint를 시작 시 로드하므로 `weights/sam_vit_b_01ec64.pth`가 없으면 Edit의 SAM 기능 또는 앱 시작이 실패할 수 있습니다.

@@ -1,4 +1,4 @@
-"""Ultralytics YOLO 학습 CLI 인자 구성 (run.py / GUI 공통).
+"""Ultralytics YOLO 학습 CLI 인자 구성 (run.py / Edit 공통).
 
 model = YOLO(str(model_source)) 에는 사용자가 고른 weights/ 내 .pt 또는 .yaml 만 전달한다.
 하드코딩된 기본 체크포인트 문자열은 넣지 않는다.
