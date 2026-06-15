@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> None:
             w / "output_1/labels",
             w / "output_1/masks",
             w / "output_1/images",
+            w / "output_1/predictions",
         ],
         "output2": [
             w / "output_2/images",

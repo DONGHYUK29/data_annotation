@@ -346,7 +346,7 @@ def save_prediction_overlay_and_meta(
     write_img = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
     cv2.imwrite(str(overlay_path), write_img)
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    return count
+    return len(records)
 
 
 @torch.inference_mode()
