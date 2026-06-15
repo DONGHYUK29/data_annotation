@@ -16,6 +16,7 @@ YOLO segmentation 데이터셋을 만들고 학습까지 이어가기 위한 로
 
 - 이미지 입력: `create/input/images/`에 PNG/JPG/JPEG/BMP 파일 배치 또는 Web Edit 업로드
 - 자동 세그멘테이션: Ultralytics YOLO-seg 모델로 1차 마스크 생성
+- Prediction 확인: 모델이 실제 출력한 class/confidence/mask를 `output_1/predictions`에 저장하고 Edit에서 오버레이로 확인
 - 수동 Edit: 브러시, 지우개, undo, SAM point assist 지원
 - 결과 복사: 보정하지 않은 샘플도 `output_2`로 일괄 복사 가능
 - 데이터셋 export: `create/output_2` 결과를 `create/dataset`으로 통합
@@ -40,7 +41,9 @@ YOLO segmentation 데이터셋을 만들고 학습까지 이어가기 위한 로
 │  ├─ output_1/
 │  │  ├─ images/
 │  │  ├─ masks/
-│  │  └─ labels/
+│  │  ├─ labels/
+│  │  └─ predictions/
+│  │     └─ masks/
 │  ├─ output_2/
 │  │  ├─ images/
 │  │  ├─ masks/
@@ -153,6 +156,13 @@ python run.py segment --input create/input/images --output create/output_1 --wei
 - `create/output_1/images/`: 마스크 overlay 이미지
 - `create/output_1/masks/`: binary mask PNG
 - `create/output_1/labels/`: YOLO-seg label TXT
+- `create/output_1/predictions/{stem}.png`: 모델 prediction 확인용 오버레이 이미지
+- `create/output_1/predictions/{stem}.json`: 모델 prediction 상세 정보
+- `create/output_1/predictions/masks/{stem}_000.png`: prediction별 binary mask PNG
+
+`output_1/masks`와 `output_1/labels`는 파일명에서 지정한 class id를 기준으로 저장됩니다. 같은 class prediction이 여러 개 있으면 confidence가 가장 높은 후보를 사용합니다. 지정 class prediction이 없으면 전체 prediction 중 confidence가 가장 높은 후보를 fallback으로 사용하고, 이 선택 이유는 prediction JSON의 `selection_reason`에 기록됩니다.
+
+Prediction 저장 시 같은 class끼리 mask IoU가 `0.75` 이상이면 같은 물체에 대한 중복 prediction으로 보고 confidence가 높은 것만 남깁니다. JSON에는 `raw_prediction_count`, `kept_prediction_count`, `selected_prediction_index`, `selected_raw_index`, 각 prediction의 `selected` 여부가 저장됩니다.
 
 참고: `--weights`는 `weights/` 안의 `.pt` 파일만 허용합니다.
 
@@ -167,6 +177,7 @@ Edit는 다음 데이터를 사용합니다.
 - 원본 이미지: `create/input/images/`
 - 초기 마스크: `create/output_1/masks/`
 - 초기 라벨: `create/output_1/labels/`
+- Prediction 오버레이: `create/output_1/predictions/`
 - 저장 결과: `create/output_2/`
 
 보정 저장 시:
@@ -174,6 +185,10 @@ Edit는 다음 데이터를 사용합니다.
 - 이미지: `create/output_2/images/{stem}.png`
 - 마스크: `create/output_2/masks/{stem}_edited.png`
 - 라벨: `create/output_2/labels/{stem}.txt`
+
+Edit 화면의 `Prediction` 버튼을 누르면 `create/output_1/predictions/{stem}.png`를 원본 이미지 위에 표시합니다. 이 오버레이는 모델이 실제 출력한 class, confidence, mask contour를 확인하기 위한 view-only 이미지이며, 브러시/SAM 편집이나 저장 결과에는 영향을 주지 않습니다. Prediction 표시 중에는 기존 편집 마스크를 숨겨서 prediction과 edit mask가 섞여 보이지 않게 합니다.
+
+Prediction 오버레이에서 노란색으로 표시된 prediction은 현재 지정 class 기준으로 `output_1/masks`와 `output_1/labels`에 선택된 후보입니다. 다른 색의 prediction은 모델이 함께 검출한 후보이며, 최종 저장 대상은 아닙니다.
 
 Edit의 remaining copy 기능은 아직 보정하지 않은 샘플을 `output_1`에서 `output_2`로 복사합니다.
 
@@ -269,6 +284,7 @@ python run.py clean --mode all
 ```
 
 주의: 지정한 작업 폴더 내부 파일이 삭제됩니다.
+`--mode output1`은 `create/output_1/images`, `masks`, `labels`, `predictions`를 함께 비웁니다.
 
 ### stage 결과 샘플 수 줄이기
 
