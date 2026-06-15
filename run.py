@@ -82,7 +82,6 @@ def run_train(args: argparse.Namespace) -> None:
     if args.project is None:
         args.project = cfg.WEIGHTS_DIR
 
-    # Train 전에 항상 dataset -> training split/build를 수행한다.
     from pipeline.build_split import main as build_main
 
     build_main(
@@ -95,7 +94,6 @@ def run_train(args: argparse.Namespace) -> None:
     )
 
     if not args.data:
-        # build_split 이 생성하는 yaml (create/training/dataset.yaml)
         args.data = str(cfg.TRAINING_DATASET_YAML)
 
     yaml_path = Path(args.data)
@@ -111,7 +109,6 @@ def run_train(args: argparse.Namespace) -> None:
 
     kwargs = train_kwargs_from_namespace(args)
     if str(model_source).lower().endswith((".yaml", ".yml")):
-        # yaml로 학습 시작 시 ultralytics가 기본 pt를 내려받아 생성하는 것을 방지
         kwargs["pretrained"] = False
     print("=" * 60)
     print("🚀 YOLO 학습 시작")

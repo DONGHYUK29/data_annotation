@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -85,83 +86,267 @@ def save_label(
     path.write_text(line + "\n", encoding="utf-8")
 
 
+def mask_to_bbox_and_polygon_norm(mask_u8: np.ndarray) -> tuple[list[float] | None, list[float] | None]:
+    m = (mask_u8 > 127).astype(np.uint8)
+    h, w = m.shape[:2]
+    ys, xs = np.where(m > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return None, None
+
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, None
+
+    cnt = max(contours, key=cv2.contourArea)
+    approx = cv2.approxPolyDP(cnt, epsilon=0.5, closed=True).reshape(-1, 2).astype(np.float32)
+    if len(approx) < 3:
+        approx = cnt.reshape(-1, 2).astype(np.float32)
+    if len(approx) < 3:
+        return None, None
+
+    denom_w = max(w - 1, 1)
+    denom_h = max(h - 1, 1)
+    poly_norm: list[float] = []
+    for x, y in approx:
+        poly_norm.append(float(np.clip(x / denom_w, 0.0, 1.0)))
+        poly_norm.append(float(np.clip(y / denom_h, 0.0, 1.0)))
+
+    xs_norm = poly_norm[0::2]
+    ys_norm = poly_norm[1::2]
+    bbox_xywhn = [
+        (min(xs_norm) + max(xs_norm)) / 2,
+        (min(ys_norm) + max(ys_norm)) / 2,
+        max(xs_norm) - min(xs_norm),
+        max(ys_norm) - min(ys_norm),
+    ]
+    return bbox_xywhn, poly_norm
+
+
 def create_overlay(image: np.ndarray, mask: np.ndarray):
     colored = np.zeros_like(image)
     colored[:, :, 1] = mask
     return cv2.addWeighted(image, 1.0, colored, 0.5, 0)
 
 
-def select_best_instance(results):
-    if results.boxes is None or len(results.boxes) == 0:
-        return None, None
-
-    if results.masks is None or results.masks.data is None:
-        return None, None
-
-    scores = results.boxes.conf.detach().cpu().numpy()
-    if len(scores) == 0:
-        return None, None
-
-    best_idx = int(np.argmax(scores))
-
-    pred_cls_id = None
-    if results.boxes.cls is not None and len(results.boxes.cls) > best_idx:
-        pred_cls_id = int(results.boxes.cls[best_idx].item())
-
-    return best_idx, pred_cls_id
-
-
-def get_mask_polygon_and_bbox_from_results(results, best_idx: int):
-    if results.masks is None or results.masks.data is None:
-        return None, None, None
-
-    if results.boxes is None or len(results.boxes) == 0:
-        return None, None, None
-
-    if best_idx >= len(results.masks.data):
-        return None, None, None
-
-    if results.boxes.xywhn is None or len(results.boxes.xywhn) <= best_idx:
-        return None, None, None
-
-    mask = results.masks.data[best_idx].detach().cpu().numpy()
-    mask = (mask > 0.5).astype(np.uint8) * 255
-
-    if not hasattr(results.masks, "xyn"):
-        return mask, None, None
-
-    segs = results.masks.xyn
-    if segs is None or best_idx >= len(segs):
-        return mask, None, None
-
-    poly = segs[best_idx]
-    if poly is None or len(poly) < 3:
-        return mask, None, None
-
-    poly = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
-
-    poly_norm: list[float] = []
-    for x, y in poly:
-        poly_norm.append(float(x))
-        poly_norm.append(float(y))
-
-    if len(poly_norm) < 6:
-        return mask, None, None
-
-    bbox_xywhn = (
-        results.boxes.xywhn[best_idx]
-        .detach()
-        .cpu()
-        .numpy()
-        .astype(np.float32)
-        .reshape(-1)
-        .tolist()
+def prediction_color(idx: int) -> tuple[int, int, int]:
+    palette = (
+        (230, 57, 70),
+        (29, 185, 84),
+        (0, 119, 182),
+        (255, 183, 3),
+        (131, 56, 236),
+        (255, 112, 67),
+        (0, 150, 136),
+        (244, 67, 154),
     )
+    return palette[idx % len(palette)]
 
-    if len(bbox_xywhn) != 4:
-        return mask, poly_norm, None
 
-    return mask, poly_norm, bbox_xywhn
+def draw_prediction_label(
+    rgba: np.ndarray,
+    text: str,
+    x: int,
+    y: int,
+    color: tuple[int, int, int],
+) -> None:
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.55
+    thickness = 2
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    h, w = rgba.shape[:2]
+    x = max(0, min(x, max(0, w - tw - 8)))
+    y = max(th + 8, min(y, h - baseline - 4))
+    cv2.rectangle(rgba, (x, y - th - 8), (x + tw + 8, y + baseline + 4), (*color, 230), -1)
+    cv2.putText(rgba, text, (x + 4, y - 3), font, scale, (255, 255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def add_prediction_mask(rgba: np.ndarray, mask: np.ndarray, color: tuple[int, int, int]) -> None:
+    on = mask > 0
+    if not np.any(on):
+        return
+
+    alpha = 115
+    existing = rgba[..., 3].astype(np.float32) / 255.0
+    new_alpha = alpha / 255.0
+    out_alpha = new_alpha + existing * (1.0 - new_alpha)
+
+    for ch, value in enumerate(color):
+        src = rgba[..., ch].astype(np.float32) / 255.0
+        dst = value / 255.0
+        blended = np.where(
+            out_alpha > 0,
+            (dst * new_alpha + src * existing * (1.0 - new_alpha)) / np.maximum(out_alpha, 1e-6),
+            0,
+        )
+        rgba[..., ch] = np.where(on, np.clip(blended * 255.0, 0, 255), rgba[..., ch]).astype(np.uint8)
+    rgba[..., 3] = np.where(on, np.clip(out_alpha * 255.0, 0, 255), rgba[..., 3]).astype(np.uint8)
+
+
+def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
+    aa = a > 127
+    bb = b > 127
+    union = np.logical_or(aa, bb).sum()
+    if union == 0:
+        return 0.0
+    inter = np.logical_and(aa, bb).sum()
+    return float(inter / union)
+
+
+def collect_prediction_records(results, h: int, w: int) -> list[dict]:
+    if results.boxes is None or results.masks is None or results.masks.data is None:
+        return []
+
+    boxes = results.boxes
+    mask_data = results.masks.data.detach().cpu().numpy()
+    xyxy = boxes.xyxy.detach().cpu().numpy() if boxes.xyxy is not None else None
+    confs = boxes.conf.detach().cpu().numpy() if boxes.conf is not None else np.zeros(len(boxes))
+    classes = boxes.cls.detach().cpu().numpy().astype(int) if boxes.cls is not None else np.zeros(len(boxes), dtype=int)
+    names = getattr(results, "names", {}) or {}
+
+    records: list[dict] = []
+    for raw_idx in range(min(len(mask_data), len(boxes))):
+        mask = (mask_data[raw_idx] > 0.5).astype(np.uint8) * 255
+        if mask.shape[:2] != (h, w):
+            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        if xyxy is not None and raw_idx < len(xyxy):
+            x1, y1, x2, y2 = xyxy[raw_idx].astype(float).tolist()
+        else:
+            ys, xs = np.where(mask > 0)
+            x1 = float(xs.min()) if len(xs) else 0.0
+            y1 = float(ys.min()) if len(ys) else 0.0
+            x2 = float(xs.max()) if len(xs) else 0.0
+            y2 = float(ys.max()) if len(ys) else 0.0
+
+        cls_id = int(classes[raw_idx])
+        records.append(
+            {
+                "raw_index": raw_idx,
+                "class_id": cls_id,
+                "class_name": names.get(cls_id, str(cls_id)) if isinstance(names, dict) else str(cls_id),
+                "confidence": float(confs[raw_idx]),
+                "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
+                "mask": mask,
+            }
+        )
+    return records
+
+
+def suppress_duplicate_predictions(records: list[dict], iou_threshold: float = 0.75) -> list[dict]:
+    kept: list[dict] = []
+    for rec in sorted(records, key=lambda r: float(r["confidence"]), reverse=True):
+        duplicate = False
+        for kept_rec in kept:
+            if int(rec["class_id"]) != int(kept_rec["class_id"]):
+                continue
+            if mask_iou(rec["mask"], kept_rec["mask"]) >= iou_threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(rec)
+    kept.sort(key=lambda r: int(r["raw_index"]))
+    return kept
+
+
+def select_prediction_record(records: list[dict], target_class_id: int | None = None) -> tuple[dict | None, str]:
+    if not records:
+        return None, "no_predictions"
+
+    if target_class_id is not None:
+        matching = [r for r in records if int(r["class_id"]) == int(target_class_id)]
+        if matching:
+            return max(matching, key=lambda r: float(r["confidence"])), "target_class"
+
+    return max(records, key=lambda r: float(r["confidence"])), "fallback_top_conf"
+
+
+def save_prediction_overlay_and_meta(
+    overlay_path: Path,
+    meta_path: Path,
+    mask_dir: Path,
+    img: np.ndarray,
+    records: list[dict],
+    conf_threshold: float,
+    selected_raw_idx: int | None = None,
+    assigned_class_id: int | None = None,
+    selection_reason: str | None = None,
+    raw_prediction_count: int = 0,
+    duplicate_iou_threshold: float = 0.75,
+) -> int:
+    h, w = img.shape[:2]
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    meta = {
+        "width": w,
+        "height": h,
+        "threshold": float(conf_threshold),
+        "selected_prediction_index": None,
+        "selected_raw_index": selected_raw_idx,
+        "assigned_class_id": assigned_class_id,
+        "selection_reason": selection_reason,
+        "raw_prediction_count": int(raw_prediction_count),
+        "kept_prediction_count": len(records),
+        "duplicate_mask_iou_threshold": float(duplicate_iou_threshold),
+        "predictions": [],
+    }
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    stem = overlay_path.stem
+    for old_mask in mask_dir.glob(f"{stem}_*.png"):
+        old_mask.unlink()
+
+    if not records:
+        write_img = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+        cv2.imwrite(str(overlay_path), write_img)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0
+
+    for idx, rec in enumerate(records):
+        mask = rec["mask"]
+        is_selected = selected_raw_idx is not None and int(rec["raw_index"]) == int(selected_raw_idx)
+        if is_selected:
+            meta["selected_prediction_index"] = idx
+
+        mask_name = f"{stem}_{idx:03d}.png"
+        mask_path = mask_dir / mask_name
+        cv2.imwrite(str(mask_path), mask)
+
+        color = prediction_color(idx)
+        if is_selected:
+            color = (255, 255, 0)
+        add_prediction_mask(rgba, mask, color)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(rgba, contours, -1, (*color, 255), 2, cv2.LINE_AA)
+
+        cls_id = int(rec["class_id"])
+        cls_name = str(rec["class_name"])
+        score = float(rec["confidence"])
+        x1, y1, x2, y2 = rec["bbox_xyxy"]
+
+        draw_prediction_label(
+            rgba,
+            f"{cls_name} {score:.2f}",
+            int(x1),
+            int(y1),
+            color,
+        )
+        meta["predictions"].append(
+            {
+                "raw_index": int(rec["raw_index"]),
+                "class_id": cls_id,
+                "class_name": cls_name,
+                "confidence": score,
+                "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
+                "mask_path": str(mask_path),
+                "mask_file": mask_name,
+                "mask_area_px": int(np.count_nonzero(mask)),
+                "selected": is_selected,
+            }
+        )
+
+    write_img = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+    cv2.imwrite(str(overlay_path), write_img)
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return count
 
 
 @torch.inference_mode()
@@ -178,10 +363,14 @@ def run_segmentation(
     mask_dir = out_root / "masks"
     label_dir = out_root / "labels"
     overlay_dir = out_root / "images"
+    prediction_dir = out_root / "predictions"
+    prediction_mask_dir = prediction_dir / "masks"
 
     mask_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
+    prediction_dir.mkdir(parents=True, exist_ok=True)
+    prediction_mask_dir.mkdir(parents=True, exist_ok=True)
 
     yw = yolo_weight or cfg.YOLO_WEIGHT
     conf = cfg.SEG_CONF_THRESHOLD if conf is None else conf
@@ -222,20 +411,43 @@ def run_segmentation(
         )
 
         for img_path, img, results in zip(valid_paths, images, results_list):
-            best_idx, pred_cls_id = select_best_instance(results)
-            if best_idx is None:
+            stem = img_path.stem
+            class_id = get_class_id_from_stem(stem)
+            h, w = img.shape[:2]
+            raw_records = collect_prediction_records(results, h, w)
+            duplicate_iou_threshold = 0.75
+            records = suppress_duplicate_predictions(raw_records, duplicate_iou_threshold)
+            selected_record, selection_reason = select_prediction_record(records, class_id)
+            selected_raw_idx = None if selected_record is None else int(selected_record["raw_index"])
+
+            prediction_overlay_path = prediction_dir / f"{stem}.png"
+            prediction_meta_path = prediction_dir / f"{stem}.json"
+            save_prediction_overlay_and_meta(
+                prediction_overlay_path,
+                prediction_meta_path,
+                prediction_mask_dir,
+                img,
+                records,
+                conf,
+                selected_raw_idx=selected_raw_idx,
+                assigned_class_id=class_id,
+                selection_reason=selection_reason,
+                raw_prediction_count=len(raw_records),
+                duplicate_iou_threshold=duplicate_iou_threshold,
+            )
+
+            if selected_record is None:
                 continue
 
             detect_count += 1
 
-            mask, poly_norm, bbox_xywhn = get_mask_polygon_and_bbox_from_results(
-                results, best_idx
-            )
-            if mask is None or poly_norm is None or bbox_xywhn is None:
+            mask = selected_record["mask"]
+            if mask is None:
                 continue
 
-            stem = img_path.stem
-            class_id = get_class_id_from_stem(stem)
+            bbox_xywhn, poly_norm = mask_to_bbox_and_polygon_norm(mask)
+            if poly_norm is None or bbox_xywhn is None:
+                continue
 
             mask_path = mask_dir / f"{stem}.png"
             label_path = label_dir / f"{stem}.txt"

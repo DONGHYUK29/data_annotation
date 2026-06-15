@@ -27,6 +27,8 @@ cfg.ensure_stage_dirs()
 IMAGE_DIR = cfg.IMAGES_RAW_DIR
 MASK_DIR = cfg.OUTPUT1_MASKS
 LABEL_DIR = cfg.OUTPUT1_LABELS
+PREDICTION_DIR = cfg.OUTPUT1_DIR / "predictions"
+PREDICTION_MASK_DIR = PREDICTION_DIR / "masks"
 
 AFTER_IMAGE_DIR = cfg.OUTPUT2_IMAGES
 AFTER_MASK_DIR = cfg.OUTPUT2_MASKS
@@ -56,6 +58,8 @@ PIPELINE_DIRS = {
     "segment_images": cfg.OUTPUT1_DIR / "images",
     "segment_labels": cfg.OUTPUT1_LABELS,
     "segment_masks": cfg.OUTPUT1_MASKS,
+    "segment_predictions": PREDICTION_DIR,
+    "segment_prediction_masks": PREDICTION_MASK_DIR,
     "export_images": cfg.DATASET_DIR / "images",
     "export_labels": cfg.DATASET_DIR / "labels",
     "export_masks": cfg.DATASET_DIR / "masks",
@@ -310,7 +314,7 @@ def get_label_path_to_load(stem: str) -> Path | None:
     edited_label = AFTER_LABEL_DIR / f"{stem}.txt"
     base_label = LABEL_DIR / f"{stem}.txt"
 
-    if edited_label.exists():
+    if edited_label.exists() and not is_stale_against_output1(edited_label, stem):
         return edited_label
     if base_label.exists():
         return base_label
@@ -372,13 +376,34 @@ def get_mask_path_to_load(stem: str) -> Path | None:
     moved_mask = AFTER_MASK_DIR / f"{stem}.png"
     base_mask = MASK_DIR / f"{stem}.png"
 
-    if edited_mask.exists():
+    if edited_mask.exists() and not is_stale_against_output1(edited_mask, stem):
         return edited_mask
-    if moved_mask.exists():
+    if moved_mask.exists() and not is_stale_against_output1(moved_mask, stem):
         return moved_mask
     if base_mask.exists():
         return base_mask
     return None
+
+
+def is_stale_against_output1(path: Path, stem: str) -> bool:
+    base_candidates = [
+        MASK_DIR / f"{stem}.png",
+        LABEL_DIR / f"{stem}.txt",
+        PREDICTION_DIR / f"{stem}.json",
+        PREDICTION_DIR / f"{stem}.png",
+    ]
+    try:
+        path_mtime = path.stat().st_mtime
+    except OSError:
+        return False
+
+    for base_path in base_candidates:
+        try:
+            if base_path.exists() and base_path.stat().st_mtime > path_mtime:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def has_output1_artifact(stem: str) -> bool:
@@ -416,6 +441,19 @@ def png_response_from_array(arr: np.ndarray) -> Response:
             "Expires": "0",
         },
     )
+
+
+def draw_overlay_message(rgba: np.ndarray, text: str) -> None:
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.55
+    thickness = 2
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+    h, w = rgba.shape[:2]
+    x = 8
+    y = min(max(th + 12, 28), max(th + 12, h - baseline - 4))
+    x = min(x, max(0, w - tw - 8))
+    cv2.rectangle(rgba, (x, y - th - 8), (x + tw + 8, y + baseline + 4), (80, 80, 80, 230), -1)
+    cv2.putText(rgba, text, (x + 4, y - 3), font, scale, (255, 255, 255, 255), thickness, cv2.LINE_AA)
 
 
 def move_remaining_files():
@@ -572,6 +610,40 @@ def api_meta(stem: str):
         "height": h,
         "class_id": resolve_class_id(stem),
     }
+
+
+@app.get("/api/prediction_overlay/{stem}")
+def api_prediction_overlay(stem: str):
+    image_path = get_display_image_path(stem)
+    if image_path is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    image_bgr = read_img_safe(image_path, cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise HTTPException(status_code=500, detail="Failed to read image")
+    h, w = image_bgr.shape[:2]
+
+    overlay_path = PREDICTION_DIR / f"{stem}.png"
+    if not overlay_path.exists():
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        draw_overlay_message(rgba, "no saved prediction overlay")
+        return png_response_from_array(rgba)
+
+    overlay = read_img_safe(overlay_path, cv2.IMREAD_UNCHANGED)
+    if overlay is None:
+        raise HTTPException(status_code=500, detail="Failed to read prediction overlay")
+
+    if overlay.ndim == 2:
+        alpha = (overlay > 0).astype(np.uint8) * 255
+        overlay = np.dstack([overlay, overlay, overlay, alpha])
+    elif overlay.shape[2] == 3:
+        alpha = np.full(overlay.shape[:2], 255, dtype=np.uint8)
+        overlay = np.dstack([overlay, alpha])
+
+    if overlay.shape[:2] != (h, w):
+        overlay = cv2.resize(overlay, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    return png_response_from_array(overlay)
 
 
 @app.post("/api/sam_predict/{stem}")
@@ -1142,7 +1214,8 @@ HTML_PAGE = r"""
 
     #baseCanvas { z-index: 1; position: relative; }
     #maskCanvas { z-index: 2; cursor: none; }
-    #promptCanvas { z-index: 3; pointer-events: none; }
+    #predictionCanvas { z-index: 3; pointer-events: none; display: none; }
+    #promptCanvas { z-index: 4; pointer-events: none; }
 
     #cursorOverlay {
       position: absolute;
@@ -1229,6 +1302,9 @@ HTML_PAGE = r"""
     }
     .history-group button {
       min-width: 82px;
+    }
+    .prediction-group button {
+      min-width: 104px;
     }
     .nav-group button {
       min-width: 78px;
@@ -1454,6 +1530,7 @@ HTML_PAGE = r"""
       <div class="viewer-wrap" id="viewerWrap">
         <div class="canvas-stack" id="canvasStack">
           <canvas id="baseCanvas"></canvas>
+          <canvas id="predictionCanvas"></canvas>
           <canvas id="maskCanvas"></canvas>
           <div id="cursorOverlay"></div>
         </div>
@@ -1471,6 +1548,9 @@ HTML_PAGE = r"""
           <div class="control-group history-group">
             <button onclick="undoMask()">Undo</button>
             <button onclick="clearMask()">Erase All</button>
+          </div>
+          <div class="control-group prediction-group">
+            <button id="predictionBtn" onclick="togglePredictionOverlay()">Prediction</button>
           </div>
           <div class="control-group zoom-group">
             <label>Zoom <input type="range" id="zoomRange" min="10" max="400" value="100" /></label>
@@ -1714,6 +1794,8 @@ let undoStack = [];
 let isDirty = false;
 let isLoading = false;
 let isSamRunning = false;
+let predictionOverlayVisible = false;
+let isPredictionLoading = false;
 let samPoints = [];
 let pipelineConfig = null;
 let activePipelineTab = ""; 
@@ -1724,8 +1806,10 @@ const MASK_DRAW_COLOR = "rgba(0,255,0,0.43)";
 const MASK_DRAW_ALPHA_THRESHOLD = 20;
 
 const baseCanvas = document.getElementById("baseCanvas");
+const predictionCanvas = document.getElementById("predictionCanvas");
 const maskCanvas = document.getElementById("maskCanvas");
 const baseCtx = baseCanvas.getContext("2d");
+const predictionCtx = predictionCanvas.getContext("2d");
 const maskCtx = maskCanvas.getContext("2d");
 
 const brushSizeEl = document.getElementById("brushSize");
@@ -1737,6 +1821,7 @@ const countInfoEl = document.getElementById("countInfo");
 const viewerWrapEl = document.getElementById("viewerWrap");
 const canvasStackEl = document.getElementById("canvasStack");
 const cursorOverlayEl = document.getElementById("cursorOverlay");
+const predictionBtnEl = document.getElementById("predictionBtn");
 const pipelineLogEl = document.getElementById("pipelineLog");
 const loadingOverlayEl = document.getElementById("loadingOverlay");
 const loadingTextEl = document.getElementById("loadingText");
@@ -1750,7 +1835,9 @@ const stepFolderMap = {
     segment: [
         { label: "create/output_1/images/", key: "segment_images" },
         { label: "create/output_1/labels/", key: "segment_labels" },
-        { label: "create/output_1/masks/", key: "segment_masks" }
+        { label: "create/output_1/masks/", key: "segment_masks" },
+        { label: "create/output_1/predictions/", key: "segment_predictions" },
+        { label: "create/output_1/predictions/masks/", key: "segment_prediction_masks" }
     ],
     export: [
         { label: "create/dataset/images", key: "export_images" },
@@ -2694,6 +2781,10 @@ maskCanvas.addEventListener("mouseleave", () => {
 
 maskCanvas.addEventListener("mousedown", (evt) => {
   if (!currentStem || isLoading) return;
+  if (predictionOverlayVisible) {
+    setStatus("Prediction overlay is view-only");
+    return;
+  }
 
   const p = getPointerPos(evt);
   if (mode === "sam_point") {
@@ -2743,6 +2834,8 @@ function applyZoom() {
 
   baseCanvas.style.width = dispW + "px";
   baseCanvas.style.height = dispH + "px";
+  predictionCanvas.style.width = dispW + "px";
+  predictionCanvas.style.height = dispH + "px";
   maskCanvas.style.width = dispW + "px";
   maskCanvas.style.height = dispH + "px";
   canvasStackEl.style.width = dispW + "px";
@@ -2770,12 +2863,18 @@ function cacheBust(url) {
 
 function clearViewer() {
   baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
+  predictionCtx.clearRect(0, 0, predictionCanvas.width, predictionCanvas.height);
   maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
 
   baseCanvas.width = 0;
   baseCanvas.height = 0;
+  predictionCanvas.width = 0;
+  predictionCanvas.height = 0;
   maskCanvas.width = 0;
   maskCanvas.height = 0;
+  predictionCanvas.style.display = "none";
+  maskCanvas.style.opacity = "1";
+  predictionBtnEl.classList.remove("active");
 
   canvasStackEl.style.width = "0px";
   canvasStackEl.style.height = "0px";
@@ -2784,10 +2883,76 @@ function clearViewer() {
   currentIndex = 0;
   undoStack = [];
   samPoints = [];
+  predictionOverlayVisible = false;
   setDirty(false);
   currentInfoEl.dataset.baseText = "";
   currentInfoEl.textContent = "";
   renderList();
+}
+
+function syncPredictionButton() {
+  predictionBtnEl.classList.toggle("active", predictionOverlayVisible);
+  predictionBtnEl.disabled = isPredictionLoading || !currentStem;
+  predictionBtnEl.textContent = isPredictionLoading ? "Loading..." : "Prediction";
+  maskCanvas.style.opacity = predictionOverlayVisible ? "0" : "1";
+}
+
+async function loadPredictionOverlay() {
+  if (!currentStem || isPredictionLoading) return false;
+
+  isPredictionLoading = true;
+  syncPredictionButton();
+  setStatus("Loading predictions...");
+
+  let overlayUrl = null;
+  try {
+    const stem = encodeURIComponent(currentStem);
+    const url = cacheBust(`/api/prediction_overlay/${stem}`);
+    const blob = await fetch(url, { cache: "no-store" }).then(r => {
+      if (!r.ok) throw new Error("Failed to fetch prediction overlay");
+      return r.blob();
+    });
+    overlayUrl = URL.createObjectURL(blob);
+    const overlay = await loadImage(overlayUrl);
+
+    predictionCanvas.width = baseCanvas.width;
+    predictionCanvas.height = baseCanvas.height;
+    predictionCtx.clearRect(0, 0, predictionCanvas.width, predictionCanvas.height);
+    predictionCtx.drawImage(overlay, 0, 0, predictionCanvas.width, predictionCanvas.height);
+    predictionCanvas.style.display = "block";
+    applyZoom();
+    setStatus("Prediction overlay on");
+    return true;
+  } catch (err) {
+    console.error(err);
+    predictionOverlayVisible = false;
+    predictionCanvas.style.display = "none";
+    predictionCtx.clearRect(0, 0, predictionCanvas.width, predictionCanvas.height);
+    setStatus("Prediction failed");
+    alert(String(err));
+    return false;
+  } finally {
+    if (overlayUrl) URL.revokeObjectURL(overlayUrl);
+    isPredictionLoading = false;
+    syncPredictionButton();
+  }
+}
+
+async function togglePredictionOverlay() {
+  if (!currentStem) return;
+
+  predictionOverlayVisible = !predictionOverlayVisible;
+  syncPredictionButton();
+
+  if (!predictionOverlayVisible) {
+    predictionCanvas.style.display = "none";
+    maskCanvas.style.opacity = "1";
+    predictionCtx.clearRect(0, 0, predictionCanvas.width, predictionCanvas.height);
+    setStatus("Prediction overlay off");
+    return;
+  }
+
+  await loadPredictionOverlay();
 }
 
 async function loadList(opts = {}) {
@@ -2887,13 +3052,17 @@ async function loadByIndex(idx, opts = {}) {
 
     baseCanvas.width = img.width;
     baseCanvas.height = img.height;
+    predictionCanvas.width = img.width;
+    predictionCanvas.height = img.height;
     maskCanvas.width = img.width;
     maskCanvas.height = img.height;
 
     baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
+    predictionCtx.clearRect(0, 0, predictionCanvas.width, predictionCanvas.height);
     maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
 
     baseCtx.drawImage(img, 0, 0);
+    predictionCanvas.style.display = "none";
     maskCtx.drawImage(mask, 0, 0);
 
     samPoints = [];
@@ -2906,6 +3075,12 @@ async function loadByIndex(idx, opts = {}) {
 
     if (autoFit) fitZoomToViewerHeight();
     else applyZoom();
+
+    if (predictionOverlayVisible) {
+      await loadPredictionOverlay();
+    } else {
+      syncPredictionButton();
+    }
 
     setStatus(`Loaded: ${currentStem}`);
   } catch (err) {
