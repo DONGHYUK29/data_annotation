@@ -14,10 +14,39 @@ import config as cfg
 from pipeline.label_utils import normalize_label_text
 
 
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
+
+
 def clean_filename(name: str) -> str:
     if name.endswith("_edited.png"):
         return name.replace("_edited.png", ".png")
     return name
+
+
+def list_images(src_dir: Path) -> list[Path]:
+    files: dict[Path, Path] = {}
+    for ext in IMAGE_EXTENSIONS:
+        for path in src_dir.glob(f"*{ext}"):
+            files[path.resolve()] = path
+        for path in src_dir.glob(f"*{ext.upper()}"):
+            files[path.resolve()] = path
+    return sorted(files.values())
+
+
+def find_mask(src_mask: Path, stem: str) -> Path | None:
+    candidates = [
+        src_mask / f"{stem}_edited.png",
+        src_mask / f"{stem}.png",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def prefixed_name(bg: str, name: str) -> str:
+    bg = bg.strip()
+    return f"{bg}_{name}" if bg else name
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -57,38 +86,37 @@ def main(argv: list[str] | None = None) -> None:
     for p in (dst_image, dst_mask, dst_label):
         p.mkdir(parents=True, exist_ok=True)
 
-    mask_files = sorted(src_mask.glob("*.png"))
-    print("Total masks:", len(mask_files))
+    image_files = list_images(src_image)
+    print("Total images:", len(image_files))
     print("Background prefix:", args.bg)
 
     count = 0
-    for mask_path in mask_files:
-        clean_name = clean_filename(mask_path.name)
-        stem = Path(clean_name).stem
-        new_name = f"{args.bg}_{clean_name}"
+    for image_src in image_files:
+        clean_name = clean_filename(image_src.name)
+        stem = image_src.stem
+        new_name = prefixed_name(args.bg, clean_name)
         new_stem = Path(new_name).stem
 
-        image_src = src_image / clean_name
         label_src = src_label / f"{stem}.txt"
+        mask_src = find_mask(src_mask, stem)
 
         image_dst = dst_image / new_name
         mask_dst = dst_mask / new_name
         label_dst = dst_label / f"{new_stem}.txt"
 
-        if image_src.exists():
-            shutil.copy2(image_src, image_dst)
-        else:
-            print("Missing image:", image_src)
-
-        shutil.copy2(mask_path, mask_dst)
-
-        if label_src.exists():
-            label_dst.write_text(
-                normalize_label_text(label_src.read_text(encoding="utf-8")),
-                encoding="utf-8",
-            )
-        else:
+        if not label_src.exists():
             print("Missing label:", label_src)
+            continue
+
+        shutil.copy2(image_src, image_dst)
+
+        if mask_src is not None:
+            shutil.copy2(mask_src, mask_dst)
+
+        label_dst.write_text(
+            normalize_label_text(label_src.read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
 
         count += 1
 
