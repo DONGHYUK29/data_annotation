@@ -192,6 +192,21 @@ def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter / union)
 
 
+def refine_yolo_mask(mask_prob: np.ndarray, h: int, w: int) -> np.ndarray:
+    mask_prob = mask_prob.astype(np.float32)
+    if mask_prob.shape[:2] != (h, w):
+        mask_prob = cv2.resize(mask_prob, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    blur_ksize = int(getattr(cfg, "SEG_MASK_BLUR_KSIZE", 0))
+    if blur_ksize > 1:
+        if blur_ksize % 2 == 0:
+            blur_ksize += 1
+        mask_prob = cv2.GaussianBlur(mask_prob, (blur_ksize, blur_ksize), 0)
+
+    threshold = float(getattr(cfg, "SEG_MASK_THRESHOLD", 0.5))
+    return (mask_prob > threshold).astype(np.uint8) * 255
+
+
 def collect_prediction_records(results, h: int, w: int) -> list[dict]:
     if results.boxes is None or results.masks is None or results.masks.data is None:
         return []
@@ -205,9 +220,7 @@ def collect_prediction_records(results, h: int, w: int) -> list[dict]:
 
     records: list[dict] = []
     for raw_idx in range(min(len(mask_data), len(boxes))):
-        mask = (mask_data[raw_idx] > 0.5).astype(np.uint8) * 255
-        if mask.shape[:2] != (h, w):
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        mask = refine_yolo_mask(mask_data[raw_idx], h, w)
 
         if xyxy is not None and raw_idx < len(xyxy):
             x1, y1, x2, y2 = xyxy[raw_idx].astype(float).tolist()
