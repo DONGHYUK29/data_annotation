@@ -95,8 +95,10 @@ SAM_MODEL_TYPE = "vit_b"
 SEG_CONF_THRESHOLD = 0.01
 SEG_BBOX_EXPAND = 1.15
 SEG_BATCH_SIZE = 16
+# Keep prediction boundaries crisp and slightly conservative. Blurring a resized
+# probability mask can bleed foreground confidence into neighboring pixels.
 SEG_MASK_THRESHOLD = 0.5
-SEG_MASK_BLUR_KSIZE = 3
+SEG_MASK_BLUR_KSIZE = 0
 
 # --- build_train_split ---
 DEFAULT_VAL_RATIO = 0.1

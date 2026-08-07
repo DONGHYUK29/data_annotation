@@ -57,17 +57,14 @@ def resolve_weights_path(weights_arg: str, weights_dir: Path) -> Path:
             f"가중치/모델 정의는 .pt 또는 .yaml 만 허용합니다: {weights_arg!r}"
         )
 
-    if p.is_file():
-        rp = p.resolve()
-        try:
-            rp.relative_to(wd)
-        except ValueError:
-            raise FileNotFoundError(
-                f"파일은 다음 폴더 안에 있어야 합니다: {wd}"
-            ) from None
-        return rp
+    cand = p.resolve() if p.is_absolute() else (wd / p).resolve()
+    try:
+        cand.relative_to(wd)
+    except ValueError:
+        raise FileNotFoundError(
+            f"파일은 다음 폴더 안에 있어야 합니다: {wd}"
+        ) from None
 
-    cand = (wd / p.name).resolve()
     if cand.is_file():
         return cand
 
@@ -116,6 +113,9 @@ def train_kwargs_from_namespace(args: argparse.Namespace) -> dict[str, Any]:
         "imgsz": args.imgsz,
         "name": args.name,
         "project": str(args.project),
+        # Ultralytics uses val=False for train-only runs. Keep the empty val
+        # directories in dataset.yaml for a consistent dataset structure.
+        "val": float(getattr(args, "val_ratio", 0.2)) > 0.0,
     }
 
     kw.update(aug)

@@ -791,12 +791,20 @@ def api_weights():
     wd = cfg.WEIGHTS_DIR
     if not wd.is_dir():
         return {"weights": []}
+    # Model definition YAML files live at the root. Trained checkpoints are
+    # written under <run>/weights/{best,last}.pt, so discover those recursively.
+    names = {
+        p.name
+        for p in wd.iterdir()
+        if p.is_file() and p.suffix.lower() in (".yaml", ".yml")
+    }
+    for p in wd.rglob("*.pt"):
+        if p.is_file():
+            names.add(str(p.relative_to(wd)).replace("\\", "/"))
+
     names = sorted(
-        {
-            p.name
-            for p in wd.iterdir()
-            if p.is_file() and p.suffix.lower() in (".pt", ".yaml", ".yml")
-        }
+        names,
+        key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)],
     )
     return {"weights": names}
 
@@ -1674,7 +1682,7 @@ HTML_PAGE = r"""
               </div>
               <div class="field">
                 <label>Val ratio</label>
-                <input id="trainValRatio" type="number" value="0.2" min="0.01" max="0.99" step="0.01" />
+                <input id="trainValRatio" type="number" value="0.2" min="0" max="0.99" step="0.01" />
               </div>
           </div>
 
@@ -2488,8 +2496,8 @@ async function runTrain() {
         return;
     }
     const valRatio = parseFloat(valRatioRaw);
-    if (!(valRatio > 0.0 && valRatio < 1.0)) {
-        alert("val_ratio는 0~1 사이 값이어야 합니다.");
+    if (!(valRatio >= 0.0 && valRatio < 1.0)) {
+        alert("val_ratio는 0 이상 1 미만이어야 합니다. 0이면 검증 없이 학습합니다.");
         return;
     }
 
