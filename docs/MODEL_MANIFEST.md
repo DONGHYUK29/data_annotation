@@ -1,6 +1,14 @@
 # Model Manifest
 
-모델 가중치는 Git 저장소에서 제외했습니다. 아래 SHA-256은 원본을 별도 보관하거나 다시 찾을 때 동일 파일인지 확인하기 위한 값입니다.
+최종 ROS 전달 모델 한 개는 Git LFS로 `models/deployment/best.pt`에 보존했습니다. 나머지 모델은 저장소에서 제외했으며, 아래 SHA-256은 동일 파일인지 확인하기 위한 값입니다.
+
+## 저장소에 포함된 전달 모델
+
+| 경로 | 바이트 | SHA-256 |
+| --- | ---: | --- |
+| `models/deployment/best.pt` | 63,514,823 | `d4722cccd5b7bda2734a01d36e8a0c782847a86cc4b08802c3716d5d980f1f35` |
+
+원본은 `Keri_project/ros/delivery/weights/best.pt`였으며, `전기연배경증강.pt`와 `배경증강후.pt`는 동일 hash의 중복 파일이었습니다.
 
 ## 프로젝트 핵심 모델
 
@@ -41,4 +49,4 @@
 sha256sum /path/to/model.pt
 ```
 
-표의 값과 일치해야 보존 당시 파일과 동일합니다. `dh_best.pt` 또는 실제 배포에 사용한 모델 하나는 GitHub가 아닌 별도 스토리지에 보관하는 것을 권장합니다.
+표의 값과 일치해야 보존 당시 파일과 동일합니다. 실제 배포에 사용한 모델은 Git LFS 포인터로 관리되므로 새 clone에서는 `git lfs pull`을 실행해야 합니다.

@@ -1,7 +1,6 @@
 # Local datasets and generated outputs
 /data/
 /weights/
-/models/
 /results/generated/
 /data_annotation/pipeline/input/
 /data_annotation/pipeline/cache/
@@ -14,6 +13,7 @@
 *.onnx
 *.engine
 *.torchscript
+!models/deployment/best.pt
 
 # Raw captures and demonstrations
 *.bag
