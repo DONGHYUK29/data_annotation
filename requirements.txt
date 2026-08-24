@@ -1,0 +1,14 @@
+# Core vision and experiment tooling. Install a CUDA-compatible PyTorch build
+# for the target machine before using GPU inference or training.
+numpy>=1.26
+opencv-python>=4.8
+Pillow>=10
+pycocotools>=2.0.7
+pyrealsense2>=2.55
+PySide6>=6.6
+PyYAML>=6.0
+torch>=2.1
+torchvision>=0.16
+tqdm>=4.66
+ultralytics>=8.4,<9
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf

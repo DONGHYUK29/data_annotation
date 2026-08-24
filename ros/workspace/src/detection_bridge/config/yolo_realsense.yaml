@@ -1,0 +1,105 @@
+realsense_rgbd_publisher_node:
+  ros__parameters:
+    camera_width: 640
+    camera_height: 480
+    camera_fps: 30
+    color_topic: /camera/camera/color/image_raw
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    frame_id: camera_color_optical_frame
+
+yolo_realsense_node:
+  ros__parameters:
+    model_path: ""
+    inference_device: ""
+    conf_thres: 0.50
+    final_conf_thres: 0.50
+    show_window: true
+    publish_every_sec: 0.0
+    color_topic: /camera/camera/color/image_raw
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    result_topic: /detection_result
+    result_json_topic: /detection_result_json
+    instance_mask_topic: /instance_mask/image
+    annotated_image_topic: /annotated_image
+    depth_scale: 0.001
+    sync_queue_size: 10
+    # Increase to 0.2 or 0.5 when RGB/Depth stamps are loose.
+    sync_slop_sec: 0.08
+    image_qos_reliability: reliable
+    debug_stamp_delta: false
+    use_depth_refine: false
+    use_refined_mask_center: true
+    publish_json_debug: false
+    publish_annotated_image: false
+    publish_instance_mask: false
+    draw_bbox_center: true
+    draw_mask_center: false
+    depth_valid_min_m: 0.10
+    depth_valid_max_m: 3.00
+    depth_refine_abs_delta_m: 0.06
+    depth_refine_rel_delta: 0.08
+    depth_refine_erode_kernel: 5
+    depth_refine_boundary_iter: 2
+    depth_refine_close_kernel: 3
+    depth_refine_bottom_keep_ratio: 0.30
+    depth_refine_min_area_ratio: 0.85
+    depth_refine_min_mask_area: 80
+    depth_refine_min_core_pixels: 30
+    depth_refine_min_valid_ratio: 0.20
+    depth_refine_keep_largest_component: true
+    draw_removed_pixels: true
+    draw_original_contour: true
+    draw_refined_contour: true
+    mask_alpha: 0.35
+    use_depth_score: false
+    depth_quality_std_tau_m: 0.05
+
+yolo_realsense_depth_refine_node:
+  ros__parameters:
+    model_path: ""
+    inference_device: ""
+    conf_thres: 0.25
+    final_conf_thres: 0.25
+    show_window: true
+    publish_every_sec: 0.0
+    color_topic: /camera/camera/color/image_raw
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    result_topic: /detection_result
+    result_json_topic: /detection_result_json
+    instance_mask_topic: /instance_mask/image
+    annotated_image_topic: /annotated_image
+    depth_scale: 0.001
+    sync_queue_size: 10
+    # Increase to 0.2 or 0.5 when RGB/Depth stamps are loose.
+    sync_slop_sec: 0.08
+    image_qos_reliability: reliable
+    debug_stamp_delta: false
+    use_depth_refine: true
+    use_refined_mask_center: true
+    publish_json_debug: false
+    publish_annotated_image: false
+    publish_instance_mask: false
+    draw_bbox_center: true
+    draw_mask_center: false
+    depth_valid_min_m: 0.10
+    depth_valid_max_m: 3.00
+    depth_refine_abs_delta_m: 0.06
+    depth_refine_rel_delta: 0.08
+    depth_refine_erode_kernel: 5
+    depth_refine_boundary_iter: 2
+    depth_refine_close_kernel: 3
+    depth_refine_bottom_keep_ratio: 0.30
+    depth_refine_min_area_ratio: 0.85
+    depth_refine_min_mask_area: 80
+    depth_refine_min_core_pixels: 30
+    depth_refine_min_valid_ratio: 0.20
+    depth_refine_keep_largest_component: true
+    draw_removed_pixels: true
+    draw_original_contour: true
+    draw_refined_contour: true
+    mask_alpha: 0.35
+    use_depth_score: false
+    depth_quality_std_tau_m: 0.05

@@ -1,0 +1,47 @@
+# Local datasets and generated outputs
+/data/
+/weights/
+/models/
+/results/generated/
+/data_annotation/pipeline/input/
+/data_annotation/pipeline/cache/
+/data_annotation/pipeline/output/
+/data_annotation/pipeline/weights/
+
+# Model artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+
+# Raw captures and demonstrations
+*.bag
+*.depth
+!sample_data/rgbd/depth/*.depth
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.webm
+
+# ROS and Python build/runtime state
+/ros/workspace/build*/
+/ros/workspace/install*/
+/ros/workspace/log*/
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments, editor state and secrets
+.venv/
+venv/
+.env
+!.env.example
+.idea/
+.vscode/
+*~
+.DS_Store
