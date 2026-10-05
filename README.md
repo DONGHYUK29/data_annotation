@@ -2,6 +2,12 @@
 
 YOLO segmentation 데이터셋을 만들고 학습까지 이어가기 위한 로컬 annotation 파이프라인입니다.
 
+## 사용법 가이드
+
+[📖 전체 사용법 가이드 보기 (PDF)](docs/data%20annotation%20program%20guide.pdf)
+
+화면별 사용 방법은 위 PDF에서 확인할 수 있습니다. 설치와 실행 방법은 아래 README를 참고하세요.
+
 현재 코드 기준의 기본 흐름은 다음과 같습니다.
 
 ```text
